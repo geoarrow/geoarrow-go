@@ -1,2 +1,2 @@
 # geoarrow-go
-Go implementation of GeoArrow
+GeoArrow Extension Types for https://github.com/apache/arrow-go
