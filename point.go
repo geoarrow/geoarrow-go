@@ -1,27 +1,13 @@
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package geoarrow
 
 import (
-	json "github.com/goccy/go-json"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
+
+	json "github.com/goccy/go-json"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -35,7 +21,7 @@ type PointType struct {
 
 type PointValue struct {
 	coords []float64
-	dim    CoordinateDimension
+	dim    Dimension
 }
 
 func NewPointValue(x, y float64) PointValue {
@@ -55,28 +41,34 @@ func NewPointValueZM(x, y, z, m float64) PointValue {
 }
 
 func (v PointValue) X() float64 {
+	if len(v.coords) < 1 {
+		return math.NaN()
+	}
 	return v.coords[0]
 }
 
 func (v PointValue) Y() float64 {
+	if len(v.coords) < 2 {
+		return math.NaN()
+	}
 	return v.coords[1]
 }
 
 func (v PointValue) Z() float64 {
 	if v.dim != XYZ && v.dim != XYZM {
-		return 0
+		return math.NaN()
 	}
 	return v.coords[2]
 }
 
 func (v PointValue) M() float64 {
 	if v.dim != XYM && v.dim != XYZM {
-		return 0
+		return math.NaN()
 	}
 	return v.coords[len(v.coords)-1]
 }
 
-func (v PointValue) Dimension() CoordinateDimension {
+func (v PointValue) Dimension() Dimension {
 	return v.dim
 }
 
@@ -155,7 +147,7 @@ func PointWithCRS(crs json.RawMessage, crsType CRSType) pointOption {
 	}
 }
 
-func PointWithStorage(storage arrow.DataType) pointOption {
+func pointWithStorage(storage arrow.DataType) pointOption {
 	return func(pt *PointType) {
 		pt.Storage = storage
 	}
@@ -165,6 +157,55 @@ func PointWithMetadata(metadata Metadata) pointOption {
 	return func(pt *PointType) {
 		pt.meta = metadata
 	}
+}
+
+func PointWithDimension(dim Dimension) pointOption {
+	return func(pt *PointType) {
+		fields := make([]arrow.Field, dim.NDim())
+		if dim > XYZM {
+			panic("invalid dimension for PointType")
+		}
+		fields[0] = arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Float64, Nullable: false}
+		fields[1] = arrow.Field{Name: "y", Type: arrow.PrimitiveTypes.Float64, Nullable: false}
+		switch dim {
+		case XYZ:
+			fields[2] = arrow.Field{Name: "z", Type: arrow.PrimitiveTypes.Float64, Nullable: false}
+		case XYM:
+			fields[2] = arrow.Field{Name: "m", Type: arrow.PrimitiveTypes.Float64, Nullable: false}
+		case XYZM:
+			fields[2] = arrow.Field{Name: "z", Type: arrow.PrimitiveTypes.Float64, Nullable: false}
+			fields[3] = arrow.Field{Name: "m", Type: arrow.PrimitiveTypes.Float64, Nullable: false}
+		}
+		pt.Storage = arrow.StructOf(fields...)
+	}
+}
+
+// PointWithInterleaved configures the PointType to use interleaved coordinate
+// storage: FixedSizeList<float64>[n_dim] with field name "xy", "xyz", "xym", or "xyzm".
+func PointWithInterleaved(dim Dimension) pointOption {
+	return func(pt *PointType) {
+		pt.Storage = interleavedStorage(dim)
+	}
+}
+
+// interleavedFieldName returns the field name for interleaved coordinates per the spec.
+func interleavedFieldName(dim Dimension) string {
+	switch dim {
+	case XYZ:
+		return "xyz"
+	case XYM:
+		return "xym"
+	case XYZM:
+		return "xyzm"
+	default:
+		return "xy"
+	}
+}
+
+func interleavedStorage(dim Dimension) arrow.DataType {
+	return arrow.FixedSizeListOfField(int32(dim.NDim()), arrow.Field{
+		Name: interleavedFieldName(dim), Type: arrow.PrimitiveTypes.Float64, Nullable: false,
+	})
 }
 
 func (pt *PointType) ExtensionName() string {
@@ -177,7 +218,20 @@ func (pt *PointType) Deserialize(storageType arrow.DataType, data string) (arrow
 		return nil, err
 	}
 
-	return NewPointType(PointWithStorage(storageType), PointWithMetadata(meta)), nil
+	switch arrowStorageType := storageType.(type) {
+	case *arrow.StructType:
+		if err := checkCoordStructFields(arrowStorageType); err != nil {
+			return nil, err
+		}
+	case *arrow.FixedSizeListType:
+		if err := checkCoordInterleaved(arrowStorageType); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unsupported storage type for geoarrow.point: %s", storageType)
+	}
+
+	return NewPointType(pointWithStorage(storageType), PointWithMetadata(meta)), nil
 }
 
 func (pt *PointType) ExtensionEquals(other arrow.ExtensionType) bool {
@@ -200,8 +254,8 @@ func (pt *PointType) ArrayType() reflect.Type {
 	return reflect.TypeOf(PointArray{})
 }
 
-// dimensionFromStructType determines the coordinate dimension from an Arrow struct type's fields.
-func dimensionFromStructType(st *arrow.StructType) CoordinateDimension {
+// DimensionFromStructType determines the coordinate dimension from an Arrow struct type's fields.
+func DimensionFromStructType(st *arrow.StructType) Dimension {
 	switch st.NumFields() {
 	case 2:
 		return XY
@@ -217,8 +271,76 @@ func dimensionFromStructType(st *arrow.StructType) CoordinateDimension {
 	}
 }
 
-func dimensionFromFieldCount(_ int, structArr *array.Struct) CoordinateDimension {
-	return dimensionFromStructType(structArr.DataType().(*arrow.StructType))
+func checkCoordStructFields(coord *arrow.StructType) error {
+	dim := DimensionFromStructType(coord)
+
+	expectedFields := dim.NDim()
+	if coord.NumFields() != expectedFields {
+		return fmt.Errorf("storage struct has %d fields but expected %d for dimension %d", coord.NumFields(), expectedFields, dim)
+	}
+	fieldNames := make(map[string]bool)
+	for i := 0; i < coord.NumFields(); i++ {
+		fieldNames[coord.Field(i).Name] = true
+	}
+	if !fieldNames["x"] || !fieldNames["y"] {
+		return fmt.Errorf("storage struct must have 'x' and 'y' fields")
+	}
+	switch dim {
+	case XYZ:
+		if !fieldNames["z"] {
+			return fmt.Errorf("storage struct must have 'z' field for XYZ dimension")
+		}
+	case XYM:
+		if !fieldNames["m"] {
+			return fmt.Errorf("storage struct must have 'm' field for XYM dimension")
+		}
+	case XYZM:
+		if !fieldNames["z"] || !fieldNames["m"] {
+			return fmt.Errorf("storage struct must have 'z' and 'm' fields for XYZM dimension")
+		}
+	}
+	return nil
+}
+
+func checkCoordInterleaved(coord *arrow.FixedSizeListType) error {
+	if coord.Elem().ID() != arrow.PrimitiveTypes.Float64.ID() {
+		return fmt.Errorf("interleaved storage must have float64 element type")
+	}
+	if coord.Len() < 2 || coord.Len() > 4 {
+		return fmt.Errorf("interleaved storage must have length between 2 and 4 for valid dimensions")
+	}
+	return nil
+}
+
+// DimensionFromInterleavedType determines dimension from a FixedSizeList storage type.
+// For length 3, the field name distinguishes XYZ ("xyz") from XYM ("xym").
+func DimensionFromInterleavedType(fsl *arrow.FixedSizeListType) Dimension {
+	switch fsl.Len() {
+	case 2:
+		return XY
+	case 3:
+		if fsl.ElemField().Name == "xym" {
+			return XYM
+		}
+		return XYZ
+	case 4:
+		return XYZM
+	default:
+		return XY
+	}
+}
+
+// DimensionFromStorage determines the coordinate dimension from any supported
+// storage type (struct or interleaved fixed-size list).
+func DimensionFromStorage(dt arrow.DataType) Dimension {
+	switch st := dt.(type) {
+	case *arrow.StructType:
+		return DimensionFromStructType(st)
+	case *arrow.FixedSizeListType:
+		return DimensionFromInterleavedType(st)
+	default:
+		return XY
+	}
 }
 
 func (pt *PointType) valueFromArray(a array.ExtensionArray, i int) PointValue {
@@ -226,21 +348,39 @@ func (pt *PointType) valueFromArray(a array.ExtensionArray, i int) PointValue {
 		return PointValue{}
 	}
 
-	structArr := a.Storage().(*array.Struct)
-	nFields := structArr.NumField()
-	coords := make([]float64, nFields)
-	for j := 0; j < nFields; j++ {
-		coords[j] = structArr.Field(j).(*array.Float64).Value(i)
+	var coords []float64
+	dim := DimensionFromStorage(pt.StorageType())
+
+	switch arr := a.Storage().(type) {
+	case *array.FixedSizeList:
+		coordArr := arr.ListValues().(*array.Float64)
+		n := dim.NDim()
+		start, _ := arr.ValueOffsets(i)
+		coords = make([]float64, n)
+		for j := 0; j < n; j++ {
+			coords[j] = coordArr.Value(int(start) + j)
+		}
+	case *array.Struct:
+		nFields := arr.NumField()
+		coords = make([]float64, nFields)
+		for j := 0; j < nFields; j++ {
+			coords[j] = arr.Field(j).(*array.Float64).Value(i)
+		}
 	}
 
-	return PointValue{coords: coords, dim: dimensionFromFieldCount(nFields, structArr)}
+	return PointValue{coords: coords, dim: dim}
 }
 
 func (pt *PointType) appendValueToBuilder(b array.Builder, v PointValue) {
-	sb := b.(*array.StructBuilder)
-	sb.Append(true)
-	for j, coord := range v.coords {
-		sb.FieldBuilder(j).(*array.Float64Builder).Append(coord)
+	switch bb := b.(type) {
+	case *array.FixedSizeListBuilder:
+		bb.Append(true)
+		bb.ValueBuilder().(*array.Float64Builder).AppendValues(v.coords, nil)
+	case *array.StructBuilder:
+		bb.Append(true)
+		for j, coord := range v.coords {
+			bb.FieldBuilder(j).(*array.Float64Builder).Append(coord)
+		}
 	}
 }
 
@@ -272,7 +412,7 @@ func (pt *PointType) valueFromString(s string) (PointValue, error) {
 		coords[i] = f
 	}
 
-	var dim CoordinateDimension
+	var dim Dimension
 	switch len(coords) {
 	case 2:
 		dim = XY
@@ -322,22 +462,7 @@ func (pt *PointType) unmarshalJSONOne(dec *json.Decoder) (PointValue, bool, erro
 		return PointValue{}, false, err
 	}
 
-	// Determine dimension from the storage type's struct fields
-	storage := pt.StorageType().(*arrow.StructType)
-	nFields := storage.NumFields()
-	var dim CoordinateDimension
-	switch nFields {
-	case 2:
-		dim = XY
-	case 3:
-		if storage.Field(2).Name == "z" {
-			dim = XYZ
-		} else {
-			dim = XYM
-		}
-	case 4:
-		dim = XYZM
-	}
+	dim := DimensionFromStorage(pt.StorageType())
 
 	return PointValue{coords: coords, dim: dim}, false, nil
 }

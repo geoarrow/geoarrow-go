@@ -54,12 +54,7 @@ func TestPointsToGeomXYZ(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(t, 0)
 
-	xyzStorage := arrow.StructOf(
-		arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-		arrow.Field{Name: "y", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-		arrow.Field{Name: "z", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-	)
-	typ := geoarrow.NewPointType(geoarrow.PointWithStorage(xyzStorage))
+	typ := geoarrow.NewPointType(geoarrow.PointWithDimension(geoarrow.XYZ))
 	builder := typ.NewBuilder(mem).(*geoarrow.PointBuilder)
 	defer builder.Release()
 
@@ -129,6 +124,110 @@ func TestPointsRoundTrip(t *testing.T) {
 			require.InDelta(t, orig.X(), roundTripped[i].X(), 1e-10)
 			require.InDelta(t, orig.Y(), roundTripped[i].Y(), 1e-10)
 		}
+	}
+}
+
+func TestPointsToGeomSliced(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	tests := []struct {
+		name string
+		typ  *geoarrow.PointType
+	}{
+		{"Struct", geoarrow.NewPointType()},
+		{"Interleaved", geoarrow.NewPointType(geoarrow.PointWithInterleaved(geoarrow.XY))},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			points := []*geom.Point{
+				geom.NewPointFlat(geom.XY, []float64{1.0, 2.0}),
+				geom.NewPointFlat(geom.XY, []float64{3.0, 4.0}),
+				geom.NewPointFlat(geom.XY, []float64{5.0, 6.0}),
+			}
+
+			arr := geoarrowgeom.PointsFromGeom(mem, points, tc.typ)
+			defer arr.Release()
+
+			// Slice to skip first element
+			sliced := array.NewSlice(arr, 1, 3)
+			defer sliced.Release()
+
+			result := geoarrowgeom.PointsToGeom(sliced.(*geoarrow.PointArray))
+			require.Equal(t, 2, len(result))
+			require.InDelta(t, 3.0, result[0].X(), 1e-10)
+			require.InDelta(t, 4.0, result[0].Y(), 1e-10)
+			require.InDelta(t, 5.0, result[1].X(), 1e-10)
+			require.InDelta(t, 6.0, result[1].Y(), 1e-10)
+		})
+	}
+}
+
+func TestPointsToGeomInterleaved(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	tests := []struct {
+		name   string
+		dim    geoarrow.Dimension
+		points []*geom.Point
+		layout geom.Layout
+	}{
+		{
+			"XY", geoarrow.XY,
+			[]*geom.Point{
+				geom.NewPointFlat(geom.XY, []float64{1.5, 2.5}),
+				nil,
+				geom.NewPointFlat(geom.XY, []float64{3.0, 4.0}),
+			},
+			geom.XY,
+		},
+		{
+			"XYZ", geoarrow.XYZ,
+			[]*geom.Point{
+				geom.NewPointFlat(geom.XYZ, []float64{1.0, 2.0, 3.0}),
+			},
+			geom.XYZ,
+		},
+		{
+			"XYM", geoarrow.XYM,
+			[]*geom.Point{
+				geom.NewPointFlat(geom.XYM, []float64{1.0, 2.0, 100.0}),
+			},
+			geom.XYM,
+		},
+		{
+			"XYZM", geoarrow.XYZM,
+			[]*geom.Point{
+				geom.NewPointFlat(geom.XYZM, []float64{1.0, 2.0, 3.0, 100.0}),
+			},
+			geom.XYZM,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			typ := geoarrow.NewPointType(geoarrow.PointWithInterleaved(tc.dim))
+
+			// FromGeom round-trip
+			arr := geoarrowgeom.PointsFromGeom(mem, tc.points, typ)
+			defer arr.Release()
+
+			pointArr := arr.(*geoarrow.PointArray)
+			result := geoarrowgeom.PointsToGeom(pointArr)
+
+			require.Equal(t, len(tc.points), len(result))
+			for i, orig := range tc.points {
+				if orig == nil {
+					require.Nil(t, result[i])
+				} else {
+					require.NotNil(t, result[i])
+					require.Equal(t, tc.layout, result[i].Layout())
+					require.InDeltaSlice(t, orig.FlatCoords(), result[i].FlatCoords(), 1e-10)
+				}
+			}
+		})
 	}
 }
 

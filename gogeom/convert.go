@@ -11,7 +11,7 @@ import (
 )
 
 // dimensionToLayout converts a geoarrow CoordinateDimension to a go-geom Layout.
-func dimensionToLayout(dim geoarrow.CoordinateDimension) geom.Layout {
+func dimensionToLayout(dim geoarrow.Dimension) geom.Layout {
 	switch dim {
 	case geoarrow.XY:
 		return geom.XY
@@ -28,76 +28,98 @@ func dimensionToLayout(dim geoarrow.CoordinateDimension) geom.Layout {
 
 // PointsToGeom converts a geoarrow PointArray to a slice of go-geom Points.
 // Null entries produce nil pointers. The conversion reads directly from the
-// underlying Arrow struct storage arrays without intermediate copies.
+// underlying Arrow storage arrays without intermediate copies.
+// Supports both struct (separated) and fixed-size list (interleaved) coordinate layouts.
 func PointsToGeom(arr *geoarrow.PointArray) []*geom.Point {
-	structArr := arr.Storage().(*array.Struct)
-	nFields := structArr.NumField()
 	n := arr.Len()
-
-	// Pre-extract the typed field arrays once
-	fields := make([]*array.Float64, nFields)
-	for i := range nFields {
-		fields[i] = structArr.Field(i).(*array.Float64)
-	}
-
-	// Determine layout from struct field count and names
-	st := arr.ExtensionType().StorageType().(*arrow.StructType)
-	dim := geoarrow.XY
-	switch nFields {
-	case 3:
-		if st.Field(2).Name == "z" {
-			dim = geoarrow.XYZ
-		} else {
-			dim = geoarrow.XYM
-		}
-	case 4:
-		dim = geoarrow.XYZM
-	}
+	dim := geoarrow.DimensionFromStorage(arr.ExtensionType().StorageType())
 	layout := dimensionToLayout(dim)
 	stride := layout.Stride()
 
 	result := make([]*geom.Point, n)
-	for i := range n {
-		if arr.IsNull(i) {
-			continue
+
+	switch storage := arr.Storage().(type) {
+	case *array.Struct:
+		fields := make([]*array.Float64, storage.NumField())
+		for i := range fields {
+			fields[i] = storage.Field(i).(*array.Float64)
 		}
-		flatCoords := make([]float64, stride)
-		for f := range nFields {
-			flatCoords[f] = fields[f].Value(i)
+		for i := range n {
+			if arr.IsNull(i) {
+				continue
+			}
+			flatCoords := make([]float64, stride)
+			for f := range fields {
+				flatCoords[f] = fields[f].Value(i)
+			}
+			result[i] = geom.NewPointFlat(layout, flatCoords)
 		}
-		result[i] = geom.NewPointFlat(layout, flatCoords)
+	case *array.FixedSizeList:
+		coordArr := storage.ListValues().(*array.Float64)
+		for i := range n {
+			if arr.IsNull(i) {
+				continue
+			}
+			start, _ := storage.ValueOffsets(i)
+			flatCoords := make([]float64, stride)
+			for j := range stride {
+				flatCoords[j] = coordArr.Value(int(start) + j)
+			}
+			result[i] = geom.NewPointFlat(layout, flatCoords)
+		}
 	}
+
 	return result
 }
 
 // PointsFromGeom converts a slice of go-geom Points to a geoarrow PointArray.
 // Nil entries become null values. The caller owns the returned array and must
 // call Release() when done.
+// Supports both struct (separated) and fixed-size list (interleaved) coordinate layouts.
 func PointsFromGeom(mem memory.Allocator, points []*geom.Point, typ *geoarrow.PointType) arrow.Array {
 	builder := typ.NewBuilder(mem).(*geoarrow.PointBuilder)
 	defer builder.Release()
 
-	st := typ.StorageType().(*arrow.StructType)
-	nFields := st.NumFields()
+	dim := geoarrow.DimensionFromStorage(typ.StorageType())
+	stride := dim.NDim()
+	storageBuilder := builder.StorageBuilder()
 
-	structBuilder := builder.StorageBuilder().(*array.StructBuilder)
-	fieldBuilders := make([]*array.Float64Builder, nFields)
-	for i := range nFields {
-		fieldBuilders[i] = structBuilder.FieldBuilder(i).(*array.Float64Builder)
-	}
-
-	for _, pt := range points {
-		if pt == nil {
-			structBuilder.AppendNull()
-			continue
+	switch sb := storageBuilder.(type) {
+	case *array.StructBuilder:
+		fieldBuilders := make([]*array.Float64Builder, stride)
+		for i := range fieldBuilders {
+			fieldBuilders[i] = sb.FieldBuilder(i).(*array.Float64Builder)
 		}
-		structBuilder.Append(true)
-		fc := pt.FlatCoords()
-		for f := range nFields {
-			if f < len(fc) {
-				fieldBuilders[f].Append(fc[f])
-			} else {
-				fieldBuilders[f].Append(0)
+		for _, pt := range points {
+			if pt == nil {
+				sb.AppendNull()
+				continue
+			}
+			sb.Append(true)
+			fc := pt.FlatCoords()
+			for f := range fieldBuilders {
+				if f < len(fc) {
+					fieldBuilders[f].Append(fc[f])
+				} else {
+					fieldBuilders[f].Append(0)
+				}
+			}
+		}
+	case *array.FixedSizeListBuilder:
+		vb := sb.ValueBuilder().(*array.Float64Builder)
+		for _, pt := range points {
+			if pt == nil {
+				sb.AppendNull()
+				continue
+			}
+			sb.Append(true)
+			fc := pt.FlatCoords()
+			for f := range stride {
+				if f < len(fc) {
+					vb.Append(fc[f])
+				} else {
+					vb.Append(0)
+				}
 			}
 		}
 	}
@@ -120,17 +142,7 @@ func PolygonsToGeom(arr *geoarrow.PolygonArray) []*geom.Polygon {
 	coordStruct := innerListType.ElemField().Type.(*arrow.StructType)
 
 	nFields := coordStruct.NumFields()
-	dim := geoarrow.XY
-	switch nFields {
-	case 3:
-		if coordStruct.Field(2).Name == "z" {
-			dim = geoarrow.XYZ
-		} else {
-			dim = geoarrow.XYM
-		}
-	case 4:
-		dim = geoarrow.XYZM
-	}
+	dim := geoarrow.DimensionFromStructType(coordStruct)
 	layout := dimensionToLayout(dim)
 
 	// Pre-extract typed field arrays

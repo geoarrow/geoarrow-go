@@ -3,7 +3,6 @@ package geoarrowgeom_test
 import (
 	"testing"
 
-	"github.com/apache/arrow-go/v18/arrow"
 	_ "github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	geoarrow "github.com/geoarrow/geoarrow-go"
@@ -267,12 +266,7 @@ func BenchmarkPolygonsFromGeom_StorageAccess(b *testing.B) {
 // and not per-field.
 func BenchmarkPointsToGeom_XYZ(b *testing.B) {
 	mem := memory.DefaultAllocator
-	xyzStorage := arrow.StructOf(
-		arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-		arrow.Field{Name: "y", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-		arrow.Field{Name: "z", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-	)
-	typ := geoarrow.NewPointType(geoarrow.PointWithStorage(xyzStorage))
+	typ := geoarrow.NewPointType(geoarrow.PointWithDimension(geoarrow.XYZ))
 	bldr := typ.NewBuilder(mem).(*geoarrow.PointBuilder)
 	defer bldr.Release()
 	for i := range benchN {

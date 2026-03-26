@@ -1,27 +1,12 @@
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package geoarrow
 
 import (
-	json "github.com/goccy/go-json"
 	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
+
+	json "github.com/goccy/go-json"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -33,10 +18,10 @@ import (
 // Each ring is stored as interleaved flat coordinates [x1,y1,x2,y2,...].
 type PolygonValue struct {
 	rings [][]float64
-	dim   CoordinateDimension
+	dim   Dimension
 }
 
-func NewPolygonValue(dim CoordinateDimension, rings [][]float64) PolygonValue {
+func NewPolygonValue(dim Dimension, rings [][]float64) PolygonValue {
 	return PolygonValue{rings: rings, dim: dim}
 }
 
@@ -54,7 +39,7 @@ func (v PolygonValue) NumVertices(i int) int {
 	return len(v.rings[i]) / v.dim.NDim()
 }
 
-func (v PolygonValue) Dimension() CoordinateDimension {
+func (v PolygonValue) Dimension() Dimension {
 	return v.dim
 }
 
@@ -230,7 +215,7 @@ func (pt *PolygonType) valueFromArray(a array.ExtensionArray, i int) PolygonValu
 
 	coordStruct := coordStructFromStorage(pt.StorageType())
 	nFields := coordStruct.NumFields()
-	dim := dimensionFromStructType(coordStruct)
+	dim := DimensionFromStructType(coordStruct)
 	stride := dim.NDim()
 
 	rings := make([][]float64, ringEnd-ringStart)
@@ -318,7 +303,7 @@ func (pt *PolygonType) valueFromString(s string) (PolygonValue, error) {
 	}
 
 	var rings [][]float64
-	var detectedDim CoordinateDimension
+	var detectedDim Dimension
 	for _, ringStr := range ringStrs {
 		parts := strings.Split(ringStr, ",")
 		var coords []float64
@@ -369,7 +354,7 @@ func (pt *PolygonType) unmarshalJSONOne(dec *json.Decoder) (PolygonValue, bool, 
 	}
 
 	coordStruct := coordStructFromStorage(pt.StorageType())
-	dim := dimensionFromStructType(coordStruct)
+	dim := DimensionFromStructType(coordStruct)
 	stride := dim.NDim()
 
 	var rings [][]float64
