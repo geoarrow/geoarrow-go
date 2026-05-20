@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"reflect"
-	"strconv"
 	"strings"
 
 	json "github.com/goccy/go-json"
@@ -93,19 +92,14 @@ func (v PointValue) Coordinates() []float64 {
 
 func (v PointValue) String() string {
 	if v.IsEmpty() {
-		return "POINT EMPTY"
+		return "POINT" + dimSuffix(v.dim) + " EMPTY"
 	}
-	b := strings.Builder{}
+	var b strings.Builder
 	b.WriteString("POINT")
 	b.WriteString(dimSuffix(v.dim))
-	b.WriteString("(")
-	for i, coord := range v.coords {
-		if i > 0 {
-			b.WriteString(" ")
-		}
-		b.WriteString(strconv.FormatFloat(coord, 'f', 6, 64))
-	}
-	b.WriteString(")")
+	b.WriteByte('(')
+	formatCoord(&b, v.coords)
+	b.WriteByte(')')
 	return b.String()
 }
 
@@ -205,95 +199,6 @@ func (pt *PointType) ArrayType() reflect.Type {
 	return reflect.TypeFor[PointArray]()
 }
 
-// DimensionFromStructType determines the coordinate dimension from an Arrow struct type's fields.
-func DimensionFromStructType(st *arrow.StructType) Dimension {
-	switch st.NumFields() {
-	case 2:
-		return XY
-	case 3:
-		if st.Field(2).Name == "z" {
-			return XYZ
-		}
-		return XYM
-	case 4:
-		return XYZM
-	default:
-		return XY
-	}
-}
-
-func checkCoordStructFields(coord *arrow.StructType) error {
-	dim := DimensionFromStructType(coord)
-
-	expectedFields := dim.NDim()
-	if coord.NumFields() != expectedFields {
-		return fmt.Errorf("storage struct has %d fields but expected %d for dimension %d", coord.NumFields(), expectedFields, dim)
-	}
-	fieldNames := make(map[string]bool)
-	for i := 0; i < coord.NumFields(); i++ {
-		fieldNames[coord.Field(i).Name] = true
-	}
-	if !fieldNames["x"] || !fieldNames["y"] {
-		return fmt.Errorf("storage struct must have 'x' and 'y' fields")
-	}
-	switch dim {
-	case XYZ:
-		if !fieldNames["z"] {
-			return fmt.Errorf("storage struct must have 'z' field for XYZ dimension")
-		}
-	case XYM:
-		if !fieldNames["m"] {
-			return fmt.Errorf("storage struct must have 'm' field for XYM dimension")
-		}
-	case XYZM:
-		if !fieldNames["z"] || !fieldNames["m"] {
-			return fmt.Errorf("storage struct must have 'z' and 'm' fields for XYZM dimension")
-		}
-	}
-	return nil
-}
-
-func checkCoordInterleaved(coord *arrow.FixedSizeListType) error {
-	if coord.Elem().ID() != arrow.PrimitiveTypes.Float64.ID() {
-		return fmt.Errorf("interleaved storage must have float64 element type")
-	}
-	if coord.Len() < 2 || coord.Len() > 4 {
-		return fmt.Errorf("interleaved storage must have length between 2 and 4 for valid dimensions")
-	}
-	return nil
-}
-
-// DimensionFromInterleavedType determines dimension from a FixedSizeList storage type.
-// For length 3, the field name distinguishes XYZ ("xyz") from XYM ("xym").
-func DimensionFromInterleavedType(fsl *arrow.FixedSizeListType) Dimension {
-	switch fsl.Len() {
-	case 2:
-		return XY
-	case 3:
-		if fsl.ElemField().Name == "xym" {
-			return XYM
-		}
-		return XYZ
-	case 4:
-		return XYZM
-	default:
-		return XY
-	}
-}
-
-// DimensionFromStorage determines the coordinate dimension from any supported
-// storage type (struct or interleaved fixed-size list).
-func DimensionFromStorage(dt arrow.DataType) Dimension {
-	switch st := dt.(type) {
-	case *arrow.StructType:
-		return DimensionFromStructType(st)
-	case *arrow.FixedSizeListType:
-		return DimensionFromInterleavedType(st)
-	default:
-		return XY
-	}
-}
-
 func (pt *PointType) valueFromArray(a array.ExtensionArray, i int) PointValue {
 	if a.IsNull(i) {
 		return PointValue{}
@@ -321,10 +226,11 @@ func (pt *PointType) valueFromString(s string) (PointValue, error) {
 	if err != nil {
 		return PointValue{}, fmt.Errorf("point WKT: %w", err)
 	}
-	if stride < 2 || stride > 4 {
-		return PointValue{}, fmt.Errorf("invalid number of coordinates: %d", stride)
+	dim, err := dimFromWKTPrefix(prefix, stride)
+	if err != nil {
+		return PointValue{}, fmt.Errorf("point WKT: %w", err)
 	}
-	return PointValue{coords: coords, dim: dimFromWKTPrefix(prefix, stride)}, nil
+	return PointValue{coords: coords, dim: dim}, nil
 }
 
 func (pt *PointType) unmarshalJSONOne(dec *json.Decoder) (PointValue, bool, error) {
@@ -336,7 +242,7 @@ func (pt *PointType) unmarshalJSONOne(dec *json.Decoder) (PointValue, bool, erro
 		return PointValue{}, true, nil
 	}
 
-	coords, err := decodeFloatsAfterOpen(dec, nil)
+	coords, err := decodeFloatsAfterOpen(dec)
 	if err != nil {
 		return PointValue{}, false, err
 	}

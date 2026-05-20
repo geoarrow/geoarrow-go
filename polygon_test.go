@@ -359,12 +359,40 @@ func TestPolygonInterleavedRoundTrip(t *testing.T) {
 			require.Equal(t, 4, got.NumVertices(0))
 			require.Equal(t, ring, got.Ring(0))
 
-			// Deserialize round-trip preserves interleaved storage.
 			deserialized, err := typ.Deserialize(typ.StorageType(), typ.Serialize())
 			require.NoError(t, err)
 			require.True(t, typ.ExtensionEquals(deserialized))
+
+			builder2 := typ.NewBuilder(mem).(*geoarrow.PolygonBuilder)
+			defer builder2.Release()
+			for i := 0; i < arr.Len(); i++ {
+				require.NoError(t, builder2.AppendValueFromString(arr.ValueStr(i)))
+			}
+			arr2 := builder2.NewArray()
+			defer arr2.Release()
+			require.True(t, array.Equal(arr, arr2))
+
+			jsonData, err := json.Marshal(arr)
+			require.NoError(t, err)
+			arr3, _, err := array.FromJSON(mem, typ, bytes.NewReader(jsonData))
+			require.NoError(t, err)
+			defer arr3.Release()
+			require.True(t, array.Equal(arr, arr3))
 		})
 	}
+}
+
+func TestPolygonDeserializeRejectsBadStorage(t *testing.T) {
+	typ := geoarrow.NewPolygonType()
+
+	// Not a list at all.
+	_, err := typ.Deserialize(arrow.PrimitiveTypes.Float64, "{}")
+	require.Error(t, err)
+
+	// Outer list but inner is not a list.
+	bad := arrow.ListOfField(arrow.Field{Name: "rings", Type: arrow.PrimitiveTypes.Float64})
+	_, err = typ.Deserialize(bad, "{}")
+	require.Error(t, err)
 }
 
 func TestPolygonMarshalJSON(t *testing.T) {

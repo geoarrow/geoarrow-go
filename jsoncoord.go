@@ -37,20 +37,20 @@ func decodeOpenOrNull(dec *json.Decoder) (isNull bool, err error) {
 }
 
 // decodeFloatsAfterOpen consumes float tokens until the next ']' (which it
-// also consumes), appending them to dst. Caller must have already consumed
-// the opening '['.
-func decodeFloatsAfterOpen(dec *json.Decoder, dst []float64) ([]float64, error) {
+// also consumes). Caller must have already consumed the opening '['.
+func decodeFloatsAfterOpen(dec *json.Decoder) ([]float64, error) {
+	var out []float64
 	for dec.More() {
 		var f float64
 		if err := dec.Decode(&f); err != nil {
 			return nil, err
 		}
-		dst = append(dst, f)
+		out = append(out, f)
 	}
 	if _, err := dec.Token(); err != nil { // closing ']'
 		return nil, err
 	}
-	return dst, nil
+	return out, nil
 }
 
 // decodeCoordList decodes a JSON array of coord arrays ([[x,y], [x,y], ...])
@@ -62,11 +62,11 @@ func decodeCoordList(dec *json.Decoder) ([]float64, error) {
 		if err := expectDelim(dec, '['); err != nil {
 			return nil, err
 		}
-		var err error
-		out, err = decodeFloatsAfterOpen(dec, out)
+		coord, err := decodeFloatsAfterOpen(dec)
 		if err != nil {
 			return nil, err
 		}
+		out = append(out, coord...)
 	}
 	if _, err := dec.Token(); err != nil { // closing ']'
 		return nil, err

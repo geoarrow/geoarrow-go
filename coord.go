@@ -55,6 +55,116 @@ func listOfNamed(name string, elem arrow.DataType) arrow.DataType {
 	return arrow.ListOfField(arrow.Field{Name: name, Type: elem, Nullable: false})
 }
 
+// nestedListStorage wraps elem in len(names) layers of List, naming each
+// layer's element field. names[0] is the outermost layer. Use for polygon
+// (["rings","vertices"]) and multipolygon (["polygons","rings","vertices"]).
+func nestedListStorage(elem arrow.DataType, names ...string) arrow.DataType {
+	for i := len(names) - 1; i >= 0; i-- {
+		elem = listOfNamed(names[i], elem)
+	}
+	return elem
+}
+
+// unwrapNestedLists peels depth layers of List off storage and returns the
+// innermost element type. Errors if any layer is not a List.
+func unwrapNestedLists(storage arrow.DataType, depth int) (arrow.DataType, error) {
+	cur := storage
+	for i := range depth {
+		lt, ok := cur.(*arrow.ListType)
+		if !ok {
+			return nil, fmt.Errorf("expected List at depth %d, got %s", i, cur)
+		}
+		cur = lt.ElemField().Type
+	}
+	return cur, nil
+}
+
+// DimensionFromStructType determines dim from a separated coord struct.
+func DimensionFromStructType(st *arrow.StructType) Dimension {
+	switch st.NumFields() {
+	case 2:
+		return XY
+	case 3:
+		if st.Field(2).Name == "z" {
+			return XYZ
+		}
+		return XYM
+	case 4:
+		return XYZM
+	default:
+		return XY
+	}
+}
+
+// DimensionFromInterleavedType determines dim from an interleaved coord FSL.
+// At length 3 the field name disambiguates XYZ ("xyz") vs XYM ("xym").
+func DimensionFromInterleavedType(fsl *arrow.FixedSizeListType) Dimension {
+	switch fsl.Len() {
+	case 2:
+		return XY
+	case 3:
+		if fsl.ElemField().Name == "xym" {
+			return XYM
+		}
+		return XYZ
+	case 4:
+		return XYZM
+	default:
+		return XY
+	}
+}
+
+// DimensionFromStorage determines dim from any supported coord storage.
+func DimensionFromStorage(dt arrow.DataType) Dimension {
+	switch st := dt.(type) {
+	case *arrow.StructType:
+		return DimensionFromStructType(st)
+	case *arrow.FixedSizeListType:
+		return DimensionFromInterleavedType(st)
+	default:
+		return XY
+	}
+}
+
+func checkCoordStructFields(coord *arrow.StructType) error {
+	dim := DimensionFromStructType(coord)
+	if coord.NumFields() != dim.NDim() {
+		return fmt.Errorf("storage struct has %d fields but expected %d for dimension %d", coord.NumFields(), dim.NDim(), dim)
+	}
+	names := make(map[string]bool, coord.NumFields())
+	for i := range coord.NumFields() {
+		names[coord.Field(i).Name] = true
+	}
+	if !names["x"] || !names["y"] {
+		return fmt.Errorf("storage struct must have 'x' and 'y' fields")
+	}
+	switch dim {
+	case XYZ:
+		if !names["z"] {
+			return fmt.Errorf("storage struct must have 'z' field for XYZ dimension")
+		}
+	case XYM:
+		if !names["m"] {
+			return fmt.Errorf("storage struct must have 'm' field for XYM dimension")
+		}
+	case XYZM:
+		if !names["z"] || !names["m"] {
+			return fmt.Errorf("storage struct must have 'z' and 'm' fields for XYZM dimension")
+		}
+	}
+	return nil
+}
+
+func checkCoordInterleaved(coord *arrow.FixedSizeListType) error {
+	if coord.Elem().ID() != arrow.PrimitiveTypes.Float64.ID() {
+		return fmt.Errorf("interleaved storage must have float64 element type")
+	}
+	if coord.Len() < 2 || coord.Len() > 4 {
+		return fmt.Errorf("interleaved storage must have length between 2 and 4 for valid dimensions")
+	}
+	return nil
+}
+
 // checkCoordStorage validates that dt is a valid GeoArrow coord storage type
 // (separated struct or interleaved FSL) and returns its dimension.
 func checkCoordStorage(dt arrow.DataType) (Dimension, error) {

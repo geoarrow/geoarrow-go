@@ -3,7 +3,6 @@ package geoarrow
 import (
 	"fmt"
 	"reflect"
-	"strconv"
 	"strings"
 
 	json "github.com/goccy/go-json"
@@ -67,32 +66,18 @@ func (v PolygonValue) String() string {
 		return "POLYGON EMPTY"
 	}
 
-	b := strings.Builder{}
+	var b strings.Builder
 	b.WriteString("POLYGON")
 	b.WriteString(dimSuffix(v.dim))
-	b.WriteString("(")
-
+	b.WriteByte('(')
 	stride := v.dim.NDim()
 	for i, ring := range v.rings {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		b.WriteString("(")
-		nVerts := len(ring) / stride
-		for vi := range nVerts {
-			if vi > 0 {
-				b.WriteString(", ")
-			}
-			for d := range stride {
-				if d > 0 {
-					b.WriteString(" ")
-				}
-				b.WriteString(strconv.FormatFloat(ring[vi*stride+d], 'f', 6, 64))
-			}
-		}
-		b.WriteString(")")
+		formatCoordRing(&b, ring, stride)
 	}
-	b.WriteString(")")
+	b.WriteByte(')')
 	return b.String()
 }
 
@@ -110,8 +95,7 @@ func (v PolygonValue) MarshalJSON() ([]byte, error) {
 	return json.Marshal(rings)
 }
 
-// PolygonType is the extension type for Polygon geometries.
-// Storage: List<List<Struct<x: double, y: double, [z: double, [m: double]]>>>
+// PolygonType is the GeoArrow extension type for Polygon geometries.
 type PolygonType struct {
 	arrow.ExtensionBase
 	Extension
@@ -131,10 +115,11 @@ func PolygonWithMetadata(metadata Metadata) polygonOption {
 	}
 }
 
-// polygonStorage builds the nested storage type List<rings: List<vertices: Coord>>
-// for a polygon, given a coord storage type (struct or FSL).
+// polygonNesting names the List layers in polygon storage from outside in.
+var polygonNesting = []string{"rings", "vertices"}
+
 func polygonStorage(coordType arrow.DataType) arrow.DataType {
-	return listOfNamed("rings", listOfNamed("vertices", coordType))
+	return nestedListStorage(coordType, polygonNesting...)
 }
 
 func defaultPolygonStorage() arrow.DataType {
@@ -177,7 +162,11 @@ func (*PolygonType) Deserialize(storageType arrow.DataType, data string) (arrow.
 	if err := json.Unmarshal([]byte(data), &meta); err != nil {
 		return nil, err
 	}
-	if _, err := checkCoordStorage(polygonCoordStorage(storageType)); err != nil {
+	coordType, err := unwrapNestedLists(storageType, len(polygonNesting))
+	if err != nil {
+		return nil, fmt.Errorf("geoarrow.polygon: %w", err)
+	}
+	if _, err := checkCoordStorage(coordType); err != nil {
 		return nil, fmt.Errorf("geoarrow.polygon: %w", err)
 	}
 	return NewPolygonType(PolygonWithStorage(storageType), PolygonWithMetadata(meta)), nil
@@ -201,12 +190,12 @@ func (*PolygonType) ArrayType() reflect.Type {
 	return reflect.TypeFor[PolygonArray]()
 }
 
-// polygonCoordStorage extracts the coord storage type (struct or FSL) from
-// the nested List<List<Coord>> polygon storage type.
+// polygonCoordStorage returns the coord storage at the bottom of the nested
+// List<List<Coord>>. Only safe to call after Deserialize / construction has
+// validated the storage shape.
 func polygonCoordStorage(storage arrow.DataType) arrow.DataType {
-	outerList := storage.(*arrow.ListType)
-	innerList := outerList.ElemField().Type.(*arrow.ListType)
-	return innerList.ElemField().Type
+	coord, _ := unwrapNestedLists(storage, len(polygonNesting))
+	return coord
 }
 
 func (pt *PolygonType) valueFromArray(a array.ExtensionArray, i int) PolygonValue {
@@ -255,7 +244,10 @@ func (pt *PolygonType) valueFromString(s string) (PolygonValue, error) {
 		return PolygonValue{}, nil
 	}
 
-	ringStrs := splitTopLevelGroups(body)
+	ringStrs, err := splitTopLevelGroups(body)
+	if err != nil {
+		return PolygonValue{}, fmt.Errorf("polygon WKT: %w", err)
+	}
 	rings := make([][]float64, 0, len(ringStrs))
 	dim := XY
 	for i, ringStr := range ringStrs {
@@ -264,7 +256,10 @@ func (pt *PolygonType) valueFromString(s string) (PolygonValue, error) {
 			return PolygonValue{}, fmt.Errorf("polygon WKT: %w", err)
 		}
 		if i == 0 {
-			dim = dimFromWKTPrefix(prefix, stride)
+			dim, err = dimFromWKTPrefix(prefix, stride)
+			if err != nil {
+				return PolygonValue{}, fmt.Errorf("polygon WKT: %w", err)
+			}
 		}
 		rings = append(rings, coords)
 	}
