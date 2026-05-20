@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// dimSuffix returns the WKT dimension marker for use after the type name:
+// dimSuffix returns the WKT dimension marker placed after the type name:
 // "", " Z", " M", or " ZM".
 func dimSuffix(dim Dimension) string {
 	switch dim {
@@ -21,13 +21,12 @@ func dimSuffix(dim Dimension) string {
 	}
 }
 
-// dimFromWKTPrefix infers the coordinate dimension from a WKT type prefix and
-// the number of values per vertex. The prefix is the substring before the
-// first '(' (e.g. "POLYGON Z" or "MULTILINESTRING").
+// dimFromWKTPrefix infers dimension from a WKT type prefix (e.g.
+// "POLYGON Z") and the observed values-per-vertex.
 func dimFromWKTPrefix(prefix string, nCoords int) Dimension {
 	upper := strings.ToUpper(prefix)
-	hasZ := strings.Contains(upper, " Z")
-	hasZM := strings.Contains(upper, " ZM") || strings.Contains(upper, "ZM")
+	hasZM := strings.Contains(upper, "ZM")
+	hasZ := !hasZM && strings.Contains(upper, " Z")
 	hasM := !hasZM && strings.Contains(upper, " M")
 
 	switch nCoords {
@@ -41,7 +40,6 @@ func dimFromWKTPrefix(prefix string, nCoords int) Dimension {
 	case 4:
 		return XYZM
 	default:
-		// Fall back to whatever the suffix says, default XY.
 		switch {
 		case hasZM:
 			return XYZM
@@ -56,8 +54,7 @@ func dimFromWKTPrefix(prefix string, nCoords int) Dimension {
 }
 
 // splitTopLevelGroups returns the substrings between matching top-level
-// parentheses inside body. Nested groups remain in their parent's substring.
-// e.g. "(1 2, 3 4), (5 6, 7 8)" → ["1 2, 3 4", "5 6, 7 8"].
+// parens in body. Nested groups remain inside their parent's substring.
 func splitTopLevelGroups(body string) []string {
 	var out []string
 	depth := 0
@@ -79,9 +76,8 @@ func splitTopLevelGroups(body string) []string {
 	return out
 }
 
-// parseWKTFlatCoords parses a comma-separated list of whitespace-separated
-// coordinates ("1 2, 3 4, 5 6") into a flat interleaved []float64 and
-// returns the inferred stride (values per vertex).
+// parseWKTFlatCoords parses comma-separated, whitespace-delimited coords
+// ("1 2, 3 4") into a flat interleaved slice plus the inferred stride.
 func parseWKTFlatCoords(s string) (coords []float64, stride int, err error) {
 	for part := range strings.SplitSeq(s, ",") {
 		fields := strings.Fields(strings.TrimSpace(part))
@@ -104,36 +100,31 @@ func parseWKTFlatCoords(s string) (coords []float64, stride int, err error) {
 	return coords, stride, nil
 }
 
-// wktBody returns the substring of s strictly between the first '(' and the
-// matching final ')'. It returns ("", true) if the WKT explicitly encodes an
-// empty geometry (e.g. "POLYGON EMPTY").
-func wktBody(s, typeName string) (body string, isEmpty bool, err error) {
+// wktSplit returns the WKT prefix (type keyword + optional dim marker) and
+// body (substring between the first '(' and matching final ')'). isEmpty is
+// true when the input encodes an explicit empty geometry like "POLYGON EMPTY".
+func wktSplit(s, typeName string) (prefix, body string, isEmpty bool, err error) {
 	s = strings.TrimSpace(s)
-	upper := strings.ToUpper(s)
-	if !strings.HasPrefix(upper, strings.ToUpper(typeName)) {
-		return "", false, fmt.Errorf("invalid %s WKT: %s", typeName, s)
-	}
-	if strings.Contains(upper, "EMPTY") {
-		return "", true, nil
-	}
-
 	openParen := strings.Index(s, "(")
 	if openParen == -1 {
-		return "", false, fmt.Errorf("invalid %s WKT: missing '(': %s", typeName, s)
+		// No body — must match either "<typeName> EMPTY" or be invalid.
+		if strings.EqualFold(strings.TrimSpace(s), typeName+" EMPTY") {
+			return strings.TrimSpace(s), "", true, nil
+		}
+		return "", "", false, fmt.Errorf("invalid %s WKT: %s", typeName, s)
 	}
-	closeParen := strings.LastIndex(s, ")")
-	if closeParen == -1 || closeParen < openParen {
-		return "", false, fmt.Errorf("invalid %s WKT: missing ')': %s", typeName, s)
+	prefix = strings.TrimSpace(s[:openParen])
+	if !strings.EqualFold(prefix[:min(len(prefix), len(typeName))], typeName) {
+		return "", "", false, fmt.Errorf("invalid %s WKT: %s", typeName, s)
 	}
-	return s[openParen+1 : closeParen], false, nil
-}
+	// "EMPTY" only ever appears in the prefix region; safe to check there.
+	if strings.Contains(strings.ToUpper(prefix), "EMPTY") {
+		return prefix, "", true, nil
+	}
 
-// wktPrefix returns the substring of s before the first '(' (the type
-// keyword plus any dimension marker like " Z").
-func wktPrefix(s string) string {
-	prefix, _, ok := strings.Cut(s, "(")
-	if !ok {
-		return strings.TrimSpace(s)
+	closeParen := strings.LastIndex(s, ")")
+	if closeParen < openParen {
+		return "", "", false, fmt.Errorf("invalid %s WKT: missing ')': %s", typeName, s)
 	}
-	return strings.TrimSpace(prefix)
+	return prefix, s[openParen+1 : closeParen], false, nil
 }

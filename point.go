@@ -161,34 +161,12 @@ func PointWithDimension(dim Dimension) pointOption {
 	}
 }
 
-// PointWithInterleaved configures the PointType to use interleaved coordinate
-// storage: FixedSizeList<float64>[n_dim] with field name "xy", "xyz", "xym", or "xyzm".
+// PointWithInterleaved configures the PointType to use interleaved coord
+// storage: FixedSizeList<float64>[n_dim].
 func PointWithInterleaved(dim Dimension) pointOption {
 	return func(pt *PointType) {
-		pt.Storage = coordStorage(dim, true)
+		pt.Storage = interleavedStorage(dim)
 	}
-}
-
-// interleavedFieldName returns the field name for interleaved coordinates per the spec.
-func interleavedFieldName(dim Dimension) string {
-	switch dim {
-	case XYZ:
-		return "xyz"
-	case XYM:
-		return "xym"
-	case XYZM:
-		return "xyzm"
-	default:
-		return "xy"
-	}
-}
-
-// interleavedStorage returns the interleaved (FixedSizeList<float64>) coord
-// storage for a given dimension.
-func interleavedStorage(dim Dimension) arrow.DataType {
-	return arrow.FixedSizeListOfField(int32(dim.NDim()), arrow.Field{
-		Name: interleavedFieldName(dim), Type: arrow.PrimitiveTypes.Float64, Nullable: false,
-	})
 }
 
 func (pt *PointType) ExtensionName() string {
@@ -331,7 +309,7 @@ func (pt *PointType) appendValueToBuilder(b array.Builder, v PointValue) {
 }
 
 func (pt *PointType) valueFromString(s string) (PointValue, error) {
-	body, isEmpty, err := wktBody(s, "POINT")
+	prefix, body, isEmpty, err := wktSplit(s, "POINT")
 	if err != nil {
 		return PointValue{}, err
 	}
@@ -346,7 +324,7 @@ func (pt *PointType) valueFromString(s string) (PointValue, error) {
 	if stride < 2 || stride > 4 {
 		return PointValue{}, fmt.Errorf("invalid number of coordinates: %d", stride)
 	}
-	return PointValue{coords: coords, dim: dimFromWKTPrefix(wktPrefix(s), stride)}, nil
+	return PointValue{coords: coords, dim: dimFromWKTPrefix(prefix, stride)}, nil
 }
 
 func (pt *PointType) unmarshalJSONOne(dec *json.Decoder) (PointValue, bool, error) {
@@ -358,7 +336,7 @@ func (pt *PointType) unmarshalJSONOne(dec *json.Decoder) (PointValue, bool, erro
 		return PointValue{}, true, nil
 	}
 
-	coords, err := decodeFloatsUntilClose(dec, nil)
+	coords, err := decodeFloatsAfterOpen(dec, nil)
 	if err != nil {
 		return PointValue{}, false, err
 	}

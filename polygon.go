@@ -138,22 +138,20 @@ func polygonStorage(coordType arrow.DataType) arrow.DataType {
 }
 
 func defaultPolygonStorage() arrow.DataType {
-	return polygonStorage(coordStorage(XY, false))
+	return polygonStorage(coordStructStorage(XY))
 }
 
-// PolygonWithDimension configures the PolygonType to use separated struct
-// coordinate storage for the given dimension.
+// PolygonWithDimension uses separated struct coord storage for the given dim.
 func PolygonWithDimension(dim Dimension) polygonOption {
 	return func(pt *PolygonType) {
-		pt.Storage = polygonStorage(coordStorage(dim, false))
+		pt.Storage = polygonStorage(coordStructStorage(dim))
 	}
 }
 
-// PolygonWithInterleaved configures the PolygonType to use interleaved
-// (FixedSizeList) coordinate storage for the given dimension.
+// PolygonWithInterleaved uses interleaved FSL coord storage for the given dim.
 func PolygonWithInterleaved(dim Dimension) polygonOption {
 	return func(pt *PolygonType) {
-		pt.Storage = polygonStorage(coordStorage(dim, true))
+		pt.Storage = polygonStorage(interleavedStorage(dim))
 	}
 }
 
@@ -249,7 +247,7 @@ func (pt *PolygonType) appendValueToBuilder(b array.Builder, v PolygonValue) {
 }
 
 func (pt *PolygonType) valueFromString(s string) (PolygonValue, error) {
-	body, isEmpty, err := wktBody(s, "POLYGON")
+	prefix, body, isEmpty, err := wktSplit(s, "POLYGON")
 	if err != nil {
 		return PolygonValue{}, err
 	}
@@ -257,7 +255,6 @@ func (pt *PolygonType) valueFromString(s string) (PolygonValue, error) {
 		return PolygonValue{}, nil
 	}
 
-	prefix := wktPrefix(s)
 	ringStrs := splitTopLevelGroups(body)
 	rings := make([][]float64, 0, len(ringStrs))
 	dim := XY

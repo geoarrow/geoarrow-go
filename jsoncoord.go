@@ -19,9 +19,8 @@ func expectDelim(dec *json.Decoder, want json.Delim) error {
 	return nil
 }
 
-// decodeOpenOrNull peeks the next token. If it is null, returns (isNull=true).
-// If it is '[', it is consumed and (isNull=false) is returned. Anything else
-// is an error.
+// decodeOpenOrNull consumes one token; if null returns isNull=true, if '['
+// returns isNull=false, otherwise errors.
 func decodeOpenOrNull(dec *json.Decoder) (isNull bool, err error) {
 	t, err := dec.Token()
 	if err != nil {
@@ -37,10 +36,10 @@ func decodeOpenOrNull(dec *json.Decoder) (isNull bool, err error) {
 	return false, nil
 }
 
-// decodeFloatsUntilClose consumes float tokens from dec until the next ']'
-// (which it also consumes), appending them to dst. The caller must have
-// already consumed the opening '['.
-func decodeFloatsUntilClose(dec *json.Decoder, dst []float64) ([]float64, error) {
+// decodeFloatsAfterOpen consumes float tokens until the next ']' (which it
+// also consumes), appending them to dst. Caller must have already consumed
+// the opening '['.
+func decodeFloatsAfterOpen(dec *json.Decoder, dst []float64) ([]float64, error) {
 	for dec.More() {
 		var f float64
 		if err := dec.Decode(&f); err != nil {
@@ -54,23 +53,17 @@ func decodeFloatsUntilClose(dec *json.Decoder, dst []float64) ([]float64, error)
 	return dst, nil
 }
 
-// decodeCoordArray decodes one bracketed coord array ([x, y, ...]) and
-// appends its values to dst. The opening '[' has NOT yet been consumed.
-func decodeCoordArray(dec *json.Decoder, dst []float64) ([]float64, error) {
-	if err := expectDelim(dec, '['); err != nil {
-		return nil, err
-	}
-	return decodeFloatsUntilClose(dec, dst)
-}
-
 // decodeCoordList decodes a JSON array of coord arrays ([[x,y], [x,y], ...])
-// into a flat interleaved slice. The outer '[' must already be consumed; the
-// closing ']' is consumed before returning.
+// into a flat interleaved slice. Caller must have already consumed the
+// outer '['; the matching ']' is consumed before returning.
 func decodeCoordList(dec *json.Decoder) ([]float64, error) {
 	var out []float64
 	for dec.More() {
+		if err := expectDelim(dec, '['); err != nil {
+			return nil, err
+		}
 		var err error
-		out, err = decodeCoordArray(dec, out)
+		out, err = decodeFloatsAfterOpen(dec, out)
 		if err != nil {
 			return nil, err
 		}

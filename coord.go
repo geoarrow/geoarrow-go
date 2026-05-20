@@ -7,17 +7,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 )
 
-// coordStorage returns the Arrow storage type for a single GeoArrow
-// coordinate, in either separated (Struct<x,y[,z][,m]>) or interleaved
-// (FixedSizeList<float64>) form, per the GeoArrow specification.
-func coordStorage(dim Dimension, interleaved bool) arrow.DataType {
-	if interleaved {
-		return interleavedStorage(dim)
-	}
-	return coordStructStorage(dim)
-}
-
-// coordStructStorage returns the separated struct storage for one coordinate.
+// coordStructStorage returns the GeoArrow separated struct storage
+// (Struct<x, y[, z][, m]>) for a coordinate of the given dimension.
 func coordStructStorage(dim Dimension) arrow.DataType {
 	fields := make([]arrow.Field, dim.NDim())
 	fields[0] = arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Float64, Nullable: false}
@@ -34,9 +25,32 @@ func coordStructStorage(dim Dimension) arrow.DataType {
 	return arrow.StructOf(fields...)
 }
 
-// listOfNamed returns a List<elem> where the element field is named.
-// GeoArrow requires specific inner field names (e.g. "vertices", "rings",
-// "points", "polygons") to disambiguate nested storage.
+// interleavedFieldName returns the GeoArrow field name for an interleaved
+// coordinate list, used to disambiguate XYZ vs XYM at length 3.
+func interleavedFieldName(dim Dimension) string {
+	switch dim {
+	case XYZ:
+		return "xyz"
+	case XYM:
+		return "xym"
+	case XYZM:
+		return "xyzm"
+	default:
+		return "xy"
+	}
+}
+
+// interleavedStorage returns the GeoArrow interleaved coord storage
+// (FixedSizeList<float64>[n_dim]) for the given dimension.
+func interleavedStorage(dim Dimension) arrow.DataType {
+	return arrow.FixedSizeListOfField(int32(dim.NDim()), arrow.Field{
+		Name: interleavedFieldName(dim), Type: arrow.PrimitiveTypes.Float64, Nullable: false,
+	})
+}
+
+// listOfNamed returns a List<elem> where the element field carries the given
+// name. GeoArrow requires specific inner field names (e.g. "vertices",
+// "rings") to disambiguate nested storage.
 func listOfNamed(name string, elem arrow.DataType) arrow.DataType {
 	return arrow.ListOfField(arrow.Field{Name: name, Type: elem, Nullable: false})
 }
@@ -60,21 +74,19 @@ func checkCoordStorage(dt arrow.DataType) (Dimension, error) {
 	}
 }
 
-// readCoordAt reads one coordinate at index i from a coord array
-// (either *array.Struct or *array.FixedSizeList) into dst. dst must be
-// pre-sized to the dimension's stride.
+// readCoordAt reads one coord at index i from a coord array (Struct or FSL)
+// into dst. len(dst) determines how many values to read.
 func readCoordAt(coordArr arrow.Array, i int, dst []float64) {
 	switch a := coordArr.(type) {
 	case *array.Struct:
-		for f := range a.NumField() {
+		for f := range len(dst) {
 			dst[f] = a.Field(f).(*array.Float64).Value(i)
 		}
 	case *array.FixedSizeList:
-		stride := int(a.DataType().(*arrow.FixedSizeListType).Len())
 		vals := a.ListValues().(*array.Float64)
 		start, _ := a.ValueOffsets(i)
 		base := int(start)
-		for f := range stride {
+		for f := range len(dst) {
 			dst[f] = vals.Value(base + f)
 		}
 	default:
@@ -82,19 +94,36 @@ func readCoordAt(coordArr arrow.Array, i int, dst []float64) {
 	}
 }
 
-// readCoordsRange reads a contiguous range [start, end) of coordinates from a
-// coord array into a flat interleaved slice of length (end-start)*stride.
+// readCoordsRange reads coords [start, end) from a coord array into a flat
+// interleaved []float64 of length (end-start)*stride. The type assertion is
+// hoisted out of the per-coord loop so large reads stay tight.
 func readCoordsRange(coordArr arrow.Array, start, end, stride int) []float64 {
 	n := end - start
 	out := make([]float64, n*stride)
-	for i := range n {
-		readCoordAt(coordArr, start+i, out[i*stride:(i+1)*stride])
+	switch a := coordArr.(type) {
+	case *array.Struct:
+		fields := make([]*array.Float64, stride)
+		for f := range stride {
+			fields[f] = a.Field(f).(*array.Float64)
+		}
+		for i := range n {
+			row := start + i
+			base := i * stride
+			for f := range stride {
+				out[base+f] = fields[f].Value(row)
+			}
+		}
+	case *array.FixedSizeList:
+		vals := a.ListValues().(*array.Float64).Float64Values()
+		baseStart, _ := a.ValueOffsets(start)
+		copy(out, vals[int(baseStart):int(baseStart)+n*stride])
+	default:
+		panic(fmt.Sprintf("readCoordsRange: unsupported coord array type %T", coordArr))
 	}
 	return out
 }
 
-// appendCoord appends one coordinate (length == stride) to a coord builder
-// (either *array.StructBuilder or *array.FixedSizeListBuilder).
+// appendCoord appends one coord (len(coord) == stride) to a coord builder.
 func appendCoord(b array.Builder, coord []float64) {
 	switch bb := b.(type) {
 	case *array.StructBuilder:
@@ -110,10 +139,30 @@ func appendCoord(b array.Builder, coord []float64) {
 	}
 }
 
-// appendCoords appends a flat interleaved coord slice to a coord builder.
+// appendCoords appends a flat interleaved slice of n*stride floats to a
+// coord builder, hoisting the builder type assertion above the inner loop.
 func appendCoords(b array.Builder, coords []float64, stride int) {
 	n := len(coords) / stride
-	for i := range n {
-		appendCoord(b, coords[i*stride:(i+1)*stride])
+	switch bb := b.(type) {
+	case *array.StructBuilder:
+		fields := make([]*array.Float64Builder, stride)
+		for f := range stride {
+			fields[f] = bb.FieldBuilder(f).(*array.Float64Builder)
+		}
+		for i := range n {
+			bb.Append(true)
+			base := i * stride
+			for f := range stride {
+				fields[f].Append(coords[base+f])
+			}
+		}
+	case *array.FixedSizeListBuilder:
+		inner := bb.ValueBuilder().(*array.Float64Builder)
+		for i := range n {
+			bb.Append(true)
+			inner.AppendValues(coords[i*stride:(i+1)*stride], nil)
+		}
+	default:
+		panic(fmt.Sprintf("appendCoords: unsupported coord builder type %T", b))
 	}
 }
