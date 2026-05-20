@@ -15,6 +15,21 @@ const (
 	XYZM
 )
 
+func (d Dimension) String() string {
+	switch d {
+	case XY:
+		return "XY"
+	case XYZ:
+		return "XYZ"
+	case XYM:
+		return "XYM"
+	case XYZM:
+		return "XYZM"
+	default:
+		return "unknown"
+	}
+}
+
 func (d Dimension) NDim() int {
 	switch d {
 	case XY:
@@ -49,15 +64,15 @@ const (
 	PointMID              GeometryTypeID = 21
 	LineStringMID         GeometryTypeID = 22
 	PolygonMID            GeometryTypeID = 23
-	MultiPointMIDID       GeometryTypeID = 24
-	MultiLineStringMIDID  GeometryTypeID = 25
-	MultiPolygonMIDID     GeometryTypeID = 26
+	MultiPointMID         GeometryTypeID = 24
+	MultiLineStringMID    GeometryTypeID = 25
+	MultiPolygonMID       GeometryTypeID = 26
 	PointZMID             GeometryTypeID = 31
 	LineStringZMID        GeometryTypeID = 32
 	PolygonZMID           GeometryTypeID = 33
-	MultiPointZMIDID      GeometryTypeID = 34
-	MultiLineStringZMIDID GeometryTypeID = 35
-	MultiPolygonZMIDID    GeometryTypeID = 36
+	MultiPointZMID        GeometryTypeID = 34
+	MultiLineStringZMID   GeometryTypeID = 35
+	MultiPolygonZMID      GeometryTypeID = 36
 )
 
 // GeometryValue represents a single concrete value of a GeoArrow geometry

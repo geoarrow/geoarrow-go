@@ -322,6 +322,51 @@ func TestPolygonValuesMethod(t *testing.T) {
 	require.Equal(t, 2, values[1].NumRings())
 }
 
+func TestPolygonInterleavedRoundTrip(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	for _, dim := range []geoarrow.Dimension{geoarrow.XY, geoarrow.XYZ, geoarrow.XYM, geoarrow.XYZM} {
+		t.Run(dim.String(), func(t *testing.T) {
+			typ := geoarrow.NewPolygonType(geoarrow.PolygonWithInterleaved(dim))
+
+			// Build a tiny triangle with the requested dimension.
+			stride := dim.NDim()
+			ring := make([]float64, 0, 4*stride)
+			for _, xy := range [][2]float64{{0, 0}, {1, 0}, {0, 1}, {0, 0}} {
+				ring = append(ring, xy[0], xy[1])
+				for k := 2; k < stride; k++ {
+					ring = append(ring, float64(k))
+				}
+			}
+			poly := geoarrow.NewPolygonValue(dim, [][]float64{ring})
+
+			builder := typ.NewBuilder(mem).(*geoarrow.PolygonBuilder)
+			defer builder.Release()
+			builder.Append(poly)
+			builder.AppendNull()
+
+			arr := builder.NewArray()
+			defer arr.Release()
+
+			require.Equal(t, 2, arr.Len())
+			require.Equal(t, 1, arr.NullN())
+
+			polyArr := arr.(*geoarrow.PolygonArray)
+			got := polyArr.Value(0)
+			require.Equal(t, dim, got.Dimension())
+			require.Equal(t, 1, got.NumRings())
+			require.Equal(t, 4, got.NumVertices(0))
+			require.Equal(t, ring, got.Ring(0))
+
+			// Deserialize round-trip preserves interleaved storage.
+			deserialized, err := typ.Deserialize(typ.StorageType(), typ.Serialize())
+			require.NoError(t, err)
+			require.True(t, typ.ExtensionEquals(deserialized))
+		})
+	}
+}
+
 func TestPolygonMarshalJSON(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(t, 0)

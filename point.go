@@ -92,16 +92,12 @@ func (v PointValue) Coordinates() []float64 {
 }
 
 func (v PointValue) String() string {
+	if v.IsEmpty() {
+		return "POINT EMPTY"
+	}
 	b := strings.Builder{}
 	b.WriteString("POINT")
-	switch v.dim {
-	case XYZ:
-		b.WriteString(" Z")
-	case XYM:
-		b.WriteString(" M")
-	case XYZM:
-		b.WriteString(" ZM")
-	}
+	b.WriteString(dimSuffix(v.dim))
 	b.WriteString("(")
 	for i, coord := range v.coords {
 		if i > 0 {
@@ -123,11 +119,8 @@ func (v PointValue) IsEmpty() bool {
 
 func NewPointType(opts ...pointOption) *PointType {
 	pt := &PointType{
-		ExtensionBase: arrow.ExtensionBase{Storage: arrow.StructOf(
-			arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			arrow.Field{Name: "y", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-		)},
-		Extension: Extension{meta: NewMetadata()},
+		ExtensionBase: arrow.ExtensionBase{Storage: coordStructStorage(XY)},
+		Extension:     Extension{meta: NewMetadata()},
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -161,22 +154,10 @@ func PointWithMetadata(metadata Metadata) pointOption {
 
 func PointWithDimension(dim Dimension) pointOption {
 	return func(pt *PointType) {
-		fields := make([]arrow.Field, dim.NDim())
 		if dim > XYZM {
 			panic("invalid dimension for PointType")
 		}
-		fields[0] = arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Float64, Nullable: false}
-		fields[1] = arrow.Field{Name: "y", Type: arrow.PrimitiveTypes.Float64, Nullable: false}
-		switch dim {
-		case XYZ:
-			fields[2] = arrow.Field{Name: "z", Type: arrow.PrimitiveTypes.Float64, Nullable: false}
-		case XYM:
-			fields[2] = arrow.Field{Name: "m", Type: arrow.PrimitiveTypes.Float64, Nullable: false}
-		case XYZM:
-			fields[2] = arrow.Field{Name: "z", Type: arrow.PrimitiveTypes.Float64, Nullable: false}
-			fields[3] = arrow.Field{Name: "m", Type: arrow.PrimitiveTypes.Float64, Nullable: false}
-		}
-		pt.Storage = arrow.StructOf(fields...)
+		pt.Storage = coordStructStorage(dim)
 	}
 }
 
@@ -184,7 +165,7 @@ func PointWithDimension(dim Dimension) pointOption {
 // storage: FixedSizeList<float64>[n_dim] with field name "xy", "xyz", "xym", or "xyzm".
 func PointWithInterleaved(dim Dimension) pointOption {
 	return func(pt *PointType) {
-		pt.Storage = interleavedStorage(dim)
+		pt.Storage = coordStorage(dim, true)
 	}
 }
 
@@ -202,6 +183,8 @@ func interleavedFieldName(dim Dimension) string {
 	}
 }
 
+// interleavedStorage returns the interleaved (FixedSizeList<float64>) coord
+// storage for a given dimension.
 func interleavedStorage(dim Dimension) arrow.DataType {
 	return arrow.FixedSizeListOfField(int32(dim.NDim()), arrow.Field{
 		Name: interleavedFieldName(dim), Type: arrow.PrimitiveTypes.Float64, Nullable: false,
@@ -218,19 +201,9 @@ func (pt *PointType) Deserialize(storageType arrow.DataType, data string) (arrow
 		return nil, err
 	}
 
-	switch arrowStorageType := storageType.(type) {
-	case *arrow.StructType:
-		if err := checkCoordStructFields(arrowStorageType); err != nil {
-			return nil, err
-		}
-	case *arrow.FixedSizeListType:
-		if err := checkCoordInterleaved(arrowStorageType); err != nil {
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf("unsupported storage type for geoarrow.point: %s", storageType)
+	if _, err := checkCoordStorage(storageType); err != nil {
+		return nil, fmt.Errorf("geoarrow.point: %w", err)
 	}
-
 	return NewPointType(pointWithStorage(storageType), PointWithMetadata(meta)), nil
 }
 
@@ -251,7 +224,7 @@ func (pt *PointType) ExtensionEquals(other arrow.ExtensionType) bool {
 }
 
 func (pt *PointType) ArrayType() reflect.Type {
-	return reflect.TypeOf(PointArray{})
+	return reflect.TypeFor[PointArray]()
 }
 
 // DimensionFromStructType determines the coordinate dimension from an Arrow struct type's fields.
@@ -347,124 +320,49 @@ func (pt *PointType) valueFromArray(a array.ExtensionArray, i int) PointValue {
 	if a.IsNull(i) {
 		return PointValue{}
 	}
-
-	var coords []float64
 	dim := DimensionFromStorage(pt.StorageType())
-
-	switch arr := a.Storage().(type) {
-	case *array.FixedSizeList:
-		coordArr := arr.ListValues().(*array.Float64)
-		n := dim.NDim()
-		start, _ := arr.ValueOffsets(i)
-		coords = make([]float64, n)
-		for j := 0; j < n; j++ {
-			coords[j] = coordArr.Value(int(start) + j)
-		}
-	case *array.Struct:
-		nFields := arr.NumField()
-		coords = make([]float64, nFields)
-		for j := 0; j < nFields; j++ {
-			coords[j] = arr.Field(j).(*array.Float64).Value(i)
-		}
-	}
-
+	coords := make([]float64, dim.NDim())
+	readCoordAt(a.Storage(), i, coords)
 	return PointValue{coords: coords, dim: dim}
 }
 
 func (pt *PointType) appendValueToBuilder(b array.Builder, v PointValue) {
-	switch bb := b.(type) {
-	case *array.FixedSizeListBuilder:
-		bb.Append(true)
-		bb.ValueBuilder().(*array.Float64Builder).AppendValues(v.coords, nil)
-	case *array.StructBuilder:
-		bb.Append(true)
-		for j, coord := range v.coords {
-			bb.FieldBuilder(j).(*array.Float64Builder).Append(coord)
-		}
-	}
+	appendCoord(b, v.coords)
 }
 
 func (pt *PointType) valueFromString(s string) (PointValue, error) {
-	// Parse WKT-style: "POINT(1.0 2.0)" or "POINT Z(1.0 2.0 3.0)" etc.
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(strings.ToUpper(s), "POINT") {
-		return PointValue{}, fmt.Errorf("invalid point WKT: %s", s)
+	body, isEmpty, err := wktBody(s, "POINT")
+	if err != nil {
+		return PointValue{}, err
+	}
+	if isEmpty {
+		return PointValue{}, nil
 	}
 
-	// Find the opening paren
-	openParen := strings.Index(s, "(")
-	if openParen == -1 {
-		return PointValue{}, fmt.Errorf("invalid point WKT: missing '(': %s", s)
+	coords, stride, err := parseWKTFlatCoords(body)
+	if err != nil {
+		return PointValue{}, fmt.Errorf("point WKT: %w", err)
 	}
-	closeParen := strings.Index(s, ")")
-	if closeParen == -1 {
-		return PointValue{}, fmt.Errorf("invalid point WKT: missing ')': %s", s)
+	if stride < 2 || stride > 4 {
+		return PointValue{}, fmt.Errorf("invalid number of coordinates: %d", stride)
 	}
-
-	coordStr := strings.TrimSpace(s[openParen+1 : closeParen])
-	parts := strings.Fields(coordStr)
-	coords := make([]float64, len(parts))
-	for i, part := range parts {
-		f, err := strconv.ParseFloat(part, 64)
-		if err != nil {
-			return PointValue{}, fmt.Errorf("invalid coordinate in WKT: %s", part)
-		}
-		coords[i] = f
-	}
-
-	var dim Dimension
-	switch len(coords) {
-	case 2:
-		dim = XY
-	case 3:
-		// Check prefix for Z vs M
-		prefix := strings.ToUpper(s[:openParen])
-		if strings.Contains(prefix, "M") && !strings.Contains(prefix, "ZM") {
-			dim = XYM
-		} else {
-			dim = XYZ
-		}
-	case 4:
-		dim = XYZM
-	default:
-		return PointValue{}, fmt.Errorf("invalid number of coordinates: %d", len(coords))
-	}
-
-	return PointValue{coords: coords, dim: dim}, nil
+	return PointValue{coords: coords, dim: dimFromWKTPrefix(wktPrefix(s), stride)}, nil
 }
 
 func (pt *PointType) unmarshalJSONOne(dec *json.Decoder) (PointValue, bool, error) {
-	t, err := dec.Token()
+	isNull, err := decodeOpenOrNull(dec)
 	if err != nil {
 		return PointValue{}, false, err
 	}
-
-	if t == nil {
+	if isNull {
 		return PointValue{}, true, nil
 	}
 
-	// Point JSON is an array of coordinates: [1.0, 2.0]
-	delim, ok := t.(json.Delim)
-	if !ok || delim != '[' {
-		return PointValue{}, false, fmt.Errorf("expected '[' for Point value, got %T(%v)", t, t)
-	}
-
-	var coords []float64
-	for dec.More() {
-		var f float64
-		if err := dec.Decode(&f); err != nil {
-			return PointValue{}, false, err
-		}
-		coords = append(coords, f)
-	}
-	// consume closing ']'
-	if _, err := dec.Token(); err != nil {
+	coords, err := decodeFloatsUntilClose(dec, nil)
+	if err != nil {
 		return PointValue{}, false, err
 	}
-
-	dim := DimensionFromStorage(pt.StorageType())
-
-	return PointValue{coords: coords, dim: dim}, false, nil
+	return PointValue{coords: coords, dim: DimensionFromStorage(pt.StorageType())}, false, nil
 }
 
 func (pt *PointType) NewBuilder(mem memory.Allocator) array.Builder {
