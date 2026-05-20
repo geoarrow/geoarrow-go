@@ -20,10 +20,14 @@ type PolygonValue struct {
 	dim   Dimension
 }
 
+// NewPolygonValue returns a polygon of the given dimension whose rings are
+// flat interleaved coord slices (each of length n_vertices * dim.NDim()).
+// The first ring is the exterior boundary; any remaining rings are holes.
 func NewPolygonValue(dim Dimension, rings [][]float64) PolygonValue {
 	return PolygonValue{rings: rings, dim: dim}
 }
 
+// NumRings returns the number of rings in v (0 for an empty polygon).
 func (v PolygonValue) NumRings() int {
 	return len(v.rings)
 }
@@ -38,10 +42,13 @@ func (v PolygonValue) NumVertices(i int) int {
 	return len(v.rings[i]) / v.dim.NDim()
 }
 
+// Dimension returns the coordinate dimension of v.
 func (v PolygonValue) Dimension() Dimension {
 	return v.dim
 }
 
+// GeometryType returns the GeoArrow GeometryTypeID for v (PolygonID,
+// PolygonZID, PolygonMID, or PolygonZMID).
 func (v PolygonValue) GeometryType() GeometryTypeID {
 	switch v.dim {
 	case XY:
@@ -53,14 +60,18 @@ func (v PolygonValue) GeometryType() GeometryTypeID {
 	case XYZM:
 		return PolygonZMID
 	default:
+		// Unreachable: v.dim is set by NewPolygonValue or by a validated
+		// storage type.
 		panic("invalid coordinate dimension for PolygonValue")
 	}
 }
 
+// IsEmpty reports whether v has no rings.
 func (v PolygonValue) IsEmpty() bool {
 	return len(v.rings) == 0
 }
 
+// String renders v as WKT (e.g. "POLYGON((0 0, 1 0, 0 1, 0 0))").
 func (v PolygonValue) String() string {
 	if v.IsEmpty() {
 		return "POLYGON EMPTY"
@@ -81,6 +92,8 @@ func (v PolygonValue) String() string {
 	return b.String()
 }
 
+// MarshalJSON encodes v as a JSON array of rings, each ring a JSON array of
+// coordinate arrays.
 func (v PolygonValue) MarshalJSON() ([]byte, error) {
 	stride := v.dim.NDim()
 	rings := make([][][]float64, len(v.rings))
@@ -95,7 +108,8 @@ func (v PolygonValue) MarshalJSON() ([]byte, error) {
 	return json.Marshal(rings)
 }
 
-// PolygonType is the GeoArrow extension type for Polygon geometries.
+// PolygonType is the GeoArrow extension type for Polygon geometries
+// (geoarrow.polygon). Storage is List<rings: List<vertices: Coord>>.
 type PolygonType struct {
 	arrow.ExtensionBase
 	Extension
@@ -103,12 +117,15 @@ type PolygonType struct {
 
 type polygonOption func(*PolygonType)
 
+// PolygonWithStorage overrides the Arrow storage type. Use when constructing
+// a PolygonType with non-default field names or a custom coord storage.
 func PolygonWithStorage(storage arrow.DataType) polygonOption {
 	return func(pt *PolygonType) {
 		pt.Storage = storage
 	}
 }
 
+// PolygonWithMetadata replaces the GeoArrow metadata on the type.
 func PolygonWithMetadata(metadata Metadata) polygonOption {
 	return func(pt *PolygonType) {
 		pt.meta = metadata
@@ -140,6 +157,8 @@ func PolygonWithInterleaved(dim Dimension) polygonOption {
 	}
 }
 
+// NewPolygonType constructs a PolygonType with the given options. The default
+// storage is separated XY Struct coords nested under "rings" / "vertices".
 func NewPolygonType(opts ...polygonOption) *PolygonType {
 	pt := &PolygonType{
 		ExtensionBase: arrow.ExtensionBase{Storage: defaultPolygonStorage()},
@@ -302,7 +321,10 @@ func (pt *PolygonType) NewBuilder(mem memory.Allocator) array.Builder {
 	}
 }
 
+// PolygonArray is the Arrow ExtensionArray for geoarrow.polygon.
 type PolygonArray = geometryArray[PolygonValue, *PolygonType]
+
+// PolygonBuilder is the Arrow Builder for geoarrow.polygon.
 type PolygonBuilder = valueBuilder[PolygonValue, *PolygonType]
 
 var _ array.CustomExtensionBuilder = (*PolygonType)(nil)

@@ -80,6 +80,8 @@ func unwrapNestedLists(storage arrow.DataType, depth int) (arrow.DataType, error
 }
 
 // DimensionFromStructType determines dim from a separated coord struct.
+// Exported for use by downstream geometry types (LineString, MultiPolygon,
+// etc.) and by tools that need to introspect existing Arrow schemas.
 func DimensionFromStructType(st *arrow.StructType) Dimension {
 	switch st.NumFields() {
 	case 2:
@@ -98,6 +100,7 @@ func DimensionFromStructType(st *arrow.StructType) Dimension {
 
 // DimensionFromInterleavedType determines dim from an interleaved coord FSL.
 // At length 3 the field name disambiguates XYZ ("xyz") vs XYM ("xym").
+// Exported for the same reasons as DimensionFromStructType.
 func DimensionFromInterleavedType(fsl *arrow.FixedSizeListType) Dimension {
 	switch fsl.Len() {
 	case 2:
@@ -114,7 +117,9 @@ func DimensionFromInterleavedType(fsl *arrow.FixedSizeListType) Dimension {
 	}
 }
 
-// DimensionFromStorage determines dim from any supported coord storage.
+// DimensionFromStorage determines dim from any supported coord storage
+// (separated Struct or interleaved FSL). Exported as the umbrella helper
+// used by downstream geometry types when inspecting nested storage.
 func DimensionFromStorage(dt arrow.DataType) Dimension {
 	switch st := dt.(type) {
 	case *arrow.StructType:
@@ -200,6 +205,8 @@ func readCoordAt(coordArr arrow.Array, i int, dst []float64) {
 			dst[f] = vals.Value(base + f)
 		}
 	default:
+		// Unreachable when callers have validated storage via
+		// checkCoordStorage during type construction / Deserialize.
 		panic(fmt.Sprintf("readCoordAt: unsupported coord array type %T", coordArr))
 	}
 }
@@ -228,6 +235,8 @@ func readCoordsRange(coordArr arrow.Array, start, end, stride int) []float64 {
 		baseStart, _ := a.ValueOffsets(start)
 		copy(out, vals[int(baseStart):int(baseStart)+n*stride])
 	default:
+		// Unreachable when callers have validated storage via
+		// checkCoordStorage during type construction / Deserialize.
 		panic(fmt.Sprintf("readCoordsRange: unsupported coord array type %T", coordArr))
 	}
 	return out
@@ -245,6 +254,7 @@ func appendCoord(b array.Builder, coord []float64) {
 		bb.Append(true)
 		bb.ValueBuilder().(*array.Float64Builder).AppendValues(coord, nil)
 	default:
+		// Unreachable: builder type is determined by the validated storage.
 		panic(fmt.Sprintf("appendCoord: unsupported coord builder type %T", b))
 	}
 }
@@ -273,6 +283,7 @@ func appendCoords(b array.Builder, coords []float64, stride int) {
 			inner.AppendValues(coords[i*stride:(i+1)*stride], nil)
 		}
 	default:
+		// Unreachable: builder type is determined by the validated storage.
 		panic(fmt.Sprintf("appendCoords: unsupported coord builder type %T", b))
 	}
 }
