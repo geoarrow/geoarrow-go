@@ -3,7 +3,7 @@ module github.com/geoarrow/geoarrow-go
 go 1.25.0
 
 require (
-	github.com/apache/arrow-go/v18 v18.7.0-rc0.0.20260720182811-c3151ade7001
+	github.com/apache/arrow-go/v18 v18.7.1-0.20260727191739-1b1f82f5848c
 	github.com/goccy/go-json v0.10.6
 	github.com/stretchr/testify v1.11.1
 	github.com/twpayne/go-geom v1.6.1
@@ -27,7 +27,7 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
-	google.golang.org/grpc v1.82.0 // indirect
+	google.golang.org/grpc v1.82.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

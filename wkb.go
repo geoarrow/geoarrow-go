@@ -10,6 +10,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/arrow-go/v18/parquet/schema"
 )
 
@@ -132,6 +133,47 @@ func (wkb *WKBType) ParquetLogicalType() schema.LogicalType {
 	return schema.GeometryLogicalType{Crs: string(wkb.meta.CRS)}
 }
 
+// ArrowTypeFromParquet maps Parquet GEOMETRY and GEOGRAPHY logical byte-array
+// columns back to the GeoArrow WKB extension type, allowing read support for the extension
+func (*WKBType) ArrowTypeFromParquet(logical schema.LogicalType, storageType arrow.DataType) (arrow.ExtensionType, error) {
+	if storageType == nil {
+		return nil, nil
+	}
+
+	// WKB is represented as variable-width bytes. Other Parquet physical
+	// storage cannot safely be interpreted as this extension type.
+	var storageOpt wkbOption
+	switch storageType.ID() {
+	case arrow.BINARY:
+		storageOpt = WKBWithBinaryStorage()
+	case arrow.LARGE_BINARY:
+		storageOpt = WKBWithLargeBinaryStorage()
+	default:
+		return nil, nil
+	}
+
+	// Preserve CRS and edge interpolation metadata encoded in the Parquet
+	// logical type so schema conversion is reversible where possible.
+	meta := NewMetadata()
+	switch logical := logical.(type) {
+	case schema.GeometryLogicalType:
+		if logical.IsCRSSet() {
+			meta.CRS = json.RawMessage(logical.CRS())
+		}
+	case schema.GeographyLogicalType:
+		if logical.IsCRSSet() {
+			meta.CRS = json.RawMessage(logical.CRS())
+		}
+		meta.Edges = EdgeInterpolation(logical.EdgeInterpolationAlgorithm())
+	default:
+		return nil, nil
+	}
+
+	// Return a new type instead of the registered receiver so the storage type
+	// and metadata match the Parquet column being converted.
+	return NewWKBType(storageOpt, WKBWithMetadata(meta)), nil
+}
+
 func (*WKBType) Deserialize(storageType arrow.DataType, data string) (arrow.ExtensionType, error) {
 	var meta Metadata
 	if err := json.Unmarshal([]byte(data), &meta); err != nil {
@@ -228,3 +270,11 @@ type WKBBuilder = valueBuilder[WKBBytes, *WKBType]
 var _ arrow.ExtensionType = (*WKBType)(nil)
 var _ array.ExtensionArray = (*WKBArray)(nil)
 var _ array.CustomExtensionBuilder = (*WKBType)(nil)
+
+// ExtensionCustomParquetType is the interface used by writers to specify when which
+// logical type in Parquet to use to reprsent the extension type.
+var _ pqarrow.ExtensionCustomParquetType = (*WKBType)(nil)
+
+// ExtensionParquetLogicalType is the interface used by readers to specify how to
+// convert an associated Parquet LogicalType back to an Arrow ExtensionType.
+var _ pqarrow.ExtensionCustomArrowReadType = (*WKBType)(nil)
