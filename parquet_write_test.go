@@ -47,7 +47,7 @@ func TestE2EWriteReadWKBWithProjJSONCRS(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(t, 0)
 
-	// Use the v3 spec form that references a PROJJSON definition stored
+	// Test the pattern used by the iceberg v3 spec form that references a PROJJSON definition stored
 	// outside the Parquet logical type instead of inlining the definition.
 	const crs = "projjson:geometry_crs"
 	rec := newFiveRowWKBRecord(t, mem, geoarrow.NewWKBType(geoarrow.WKBWithMetadata(geoarrow.Metadata{
@@ -76,7 +76,7 @@ func TestE2EReadTableWKBWithProjJSONCRS(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(t, 0)
 
-	// The v3 Parquet geospatial spec stores CRS as an opaque identifier string.
+	// Test the pattern used by v3 iceberg geospatial spec which stores CRS as an opaque identifier string.
 	// In this form, the PROJJSON definition lives in table metadata elsewhere.
 	const crs = "projjson:geometry_crs"
 	rec := newFiveRowWKBRecord(t, mem, geoarrow.NewWKBType(geoarrow.WKBWithMetadata(geoarrow.Metadata{
