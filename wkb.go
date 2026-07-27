@@ -275,6 +275,6 @@ var _ array.CustomExtensionBuilder = (*WKBType)(nil)
 // logical type in Parquet to use to reprsent the extension type.
 var _ pqarrow.ExtensionCustomParquetType = (*WKBType)(nil)
 
-// ExtensionParquetLogicalType is the interface used by readers to specify how to
+// ExtensionCustomArrowReadType is the interface used by readers to specify how to
 // convert an associated Parquet LogicalType back to an Arrow ExtensionType.
 var _ pqarrow.ExtensionCustomArrowReadType = (*WKBType)(nil)
