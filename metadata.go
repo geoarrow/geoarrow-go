@@ -53,10 +53,10 @@ func NewMetadata() Metadata {
 	return Metadata{}
 }
 
-// SetParquetCRS stores a Parquet CRS string in GeoArrow metadata. Parquet CRS
+// SetCRSString stores a Parquet CRS string in GeoArrow metadata. Parquet CRS
 // values are opaque strings; GeoArrow metadata requires non-PROJJSON CRS values
 // to be encoded as JSON strings and tagged with a CRS type.
-func (m *Metadata) SetParquetCRS(crs string) {
+func (m *Metadata) SetCRSString(crs string) {
 	if crs == "" {
 		m.CRS = nil
 		m.CRSType = ""

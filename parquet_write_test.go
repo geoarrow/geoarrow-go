@@ -51,7 +51,7 @@ func TestE2EWriteReadWKBWithProjJSONCRS(t *testing.T) {
 	// outside the Parquet logical type instead of inlining the definition.
 	const crs = "projjson:geometry_crs"
 	meta := geoarrow.NewMetadata()
-	meta.SetParquetCRS(crs)
+	meta.SetCRSString(crs)
 	rec := newFiveRowWKBRecord(t, mem, geoarrow.NewWKBType(geoarrow.WKBWithMetadata(meta)))
 	defer rec.Release()
 
@@ -82,7 +82,7 @@ func TestE2EReadTableWKBWithProjJSONCRS(t *testing.T) {
 	// In this form, the PROJJSON definition lives in table metadata elsewhere.
 	const crs = "projjson:geometry_crs"
 	meta := geoarrow.NewMetadata()
-	meta.SetParquetCRS(crs)
+	meta.SetCRSString(crs)
 	rec := newFiveRowWKBRecord(t, mem, geoarrow.NewWKBType(geoarrow.WKBWithMetadata(meta)))
 	defer rec.Release()
 

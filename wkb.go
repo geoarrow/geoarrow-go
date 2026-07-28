@@ -158,11 +158,11 @@ func (*WKBType) ArrowTypeFromParquet(logical schema.LogicalType, storageType arr
 	switch logical := logical.(type) {
 	case schema.GeometryLogicalType:
 		if logical.IsCRSSet() {
-			meta.SetParquetCRS(logical.CRS())
+			meta.SetCRSString(logical.CRS())
 		}
 	case schema.GeographyLogicalType:
 		if logical.IsCRSSet() {
-			meta.SetParquetCRS(logical.CRS())
+			meta.SetCRSString(logical.CRS())
 		}
 		edges, ok := edgeInterpolationFromParquet(logical.EdgeInterpolationAlgorithm())
 		if !ok {
