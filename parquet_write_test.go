@@ -50,9 +50,9 @@ func TestE2EWriteReadWKBWithProjJSONCRS(t *testing.T) {
 	// Test the pattern used by the iceberg v3 spec form that references a PROJJSON definition stored
 	// outside the Parquet logical type instead of inlining the definition.
 	const crs = "projjson:geometry_crs"
-	rec := newFiveRowWKBRecord(t, mem, geoarrow.NewWKBType(geoarrow.WKBWithMetadata(geoarrow.Metadata{
-		CRS: []byte(crs),
-	})))
+	meta := geoarrow.NewMetadata()
+	meta.SetParquetCRS(crs)
+	rec := newFiveRowWKBRecord(t, mem, geoarrow.NewWKBType(geoarrow.WKBWithMetadata(meta)))
 	defer rec.Release()
 
 	// First verify the write path stores the CRS on the Parquet GEOMETRY
@@ -68,7 +68,9 @@ func TestE2EWriteReadWKBWithProjJSONCRS(t *testing.T) {
 	wkb, ok := arrsc.Field(0).Type.(*geoarrow.WKBType)
 	require.True(t, ok)
 	require.True(t, arrow.TypeEqual(arrow.BinaryTypes.Binary, wkb.StorageType()))
-	require.Equal(t, crs, string(wkb.Metadata().CRS))
+	require.Equal(t, crs, wkb.Metadata().ParquetCRS())
+	require.Equal(t, geoarrow.CRSTypeSRID, wkb.Metadata().CRSType)
+	require.JSONEq(t, `{"crs":"projjson:geometry_crs","crs_type":"srid"}`, wkb.Serialize())
 	require.True(t, schema.GeometryLogicalType{Crs: crs}.Equals(wkb.ParquetLogicalType()))
 }
 
@@ -79,9 +81,9 @@ func TestE2EReadTableWKBWithProjJSONCRS(t *testing.T) {
 	// Test the pattern used by v3 iceberg geospatial spec which stores CRS as an opaque identifier string.
 	// In this form, the PROJJSON definition lives in table metadata elsewhere.
 	const crs = "projjson:geometry_crs"
-	rec := newFiveRowWKBRecord(t, mem, geoarrow.NewWKBType(geoarrow.WKBWithMetadata(geoarrow.Metadata{
-		CRS: []byte(crs),
-	})))
+	meta := geoarrow.NewMetadata()
+	meta.SetParquetCRS(crs)
+	rec := newFiveRowWKBRecord(t, mem, geoarrow.NewWKBType(geoarrow.WKBWithMetadata(meta)))
 	defer rec.Release()
 
 	// Use the low-level writer helper so the file relies on the Parquet logical
@@ -111,7 +113,9 @@ func TestE2EReadTableWKBWithProjJSONCRS(t *testing.T) {
 	wkbType, ok := tbl.Schema().Field(0).Type.(*geoarrow.WKBType)
 	require.True(t, ok)
 	require.True(t, arrow.TypeEqual(arrow.BinaryTypes.Binary, wkbType.StorageType()))
-	require.Equal(t, crs, string(wkbType.Metadata().CRS))
+	require.Equal(t, crs, wkbType.Metadata().ParquetCRS())
+	require.Equal(t, geoarrow.CRSTypeSRID, wkbType.Metadata().CRSType)
+	require.JSONEq(t, `{"crs":"projjson:geometry_crs","crs_type":"srid"}`, wkbType.Serialize())
 
 	// Reading data should produce a usable WKB extension array, not just a
 	// binary array with the right schema metadata.
@@ -148,10 +152,27 @@ func TestFromParquetGeometryLogicalTypeToWKB(t *testing.T) {
 	wkb, ok := arrsc.Field(0).Type.(*geoarrow.WKBType)
 	require.True(t, ok)
 	require.True(t, arrow.TypeEqual(arrow.BinaryTypes.Binary, wkb.StorageType()))
-	require.Equal(t, "EPSG:4326", string(wkb.Metadata().CRS))
+	require.Equal(t, "EPSG:4326", wkb.Metadata().ParquetCRS())
+	require.Equal(t, geoarrow.CRSTypeSRID, wkb.Metadata().CRSType)
 	require.Equal(t, geoarrow.EdgePlanar, wkb.Metadata().Edges)
+	require.JSONEq(t, `{"crs":"EPSG:4326","crs_type":"srid"}`, wkb.Serialize())
 	// The reconstructed WKB type should write back to an equivalent Parquet
 	// logical type.
+	require.True(t, logical.Equals(wkb.ParquetLogicalType()))
+}
+
+func TestFromParquetGeometryLogicalTypeWithProjJSONToWKB(t *testing.T) {
+	crs := `{"type":"GeographicCRS","name":"WGS 84"}`
+	logical := schema.GeometryLogicalType{Crs: crs}
+
+	arrsc, err := pqarrow.FromParquet(newSingleColumnParquetSchema(t, "geometry", logical), nil, nil)
+	require.NoError(t, err)
+
+	wkb, ok := arrsc.Field(0).Type.(*geoarrow.WKBType)
+	require.True(t, ok)
+	require.Equal(t, crs, wkb.Metadata().ParquetCRS())
+	require.Equal(t, geoarrow.CRSTypePROJJSON, wkb.Metadata().CRSType)
+	require.JSONEq(t, `{"crs":{"type":"GeographicCRS","name":"WGS 84"},"crs_type":"projjson"}`, wkb.Serialize())
 	require.True(t, logical.Equals(wkb.ParquetLogicalType()))
 }
 
@@ -174,9 +195,18 @@ func TestFromParquetGeographyLogicalTypeToWKB(t *testing.T) {
 	wkb, ok := arrsc.Field(0).Type.(*geoarrow.WKBType)
 	require.True(t, ok)
 	require.True(t, arrow.TypeEqual(arrow.BinaryTypes.Binary, wkb.StorageType()))
-	require.Equal(t, "OGC:CRS84", string(wkb.Metadata().CRS))
+	require.Equal(t, "OGC:CRS84", wkb.Metadata().ParquetCRS())
+	require.Equal(t, geoarrow.CRSTypeSRID, wkb.Metadata().CRSType)
 	require.Equal(t, geoarrow.EdgeKarney, wkb.Metadata().Edges)
+	require.JSONEq(t, `{"crs":"OGC:CRS84","crs_type":"srid","edges":"karney"}`, wkb.Serialize())
 	require.True(t, logical.Equals(wkb.ParquetLogicalType()))
+}
+
+func TestFromParquetGeographyLogicalTypeRejectsUnknownEdgeAlgorithm(t *testing.T) {
+	_, err := geoarrow.NewWKBType().ArrowTypeFromParquet(schema.GeographyLogicalType{
+		Algorithm: schema.GeographyEdgeInterpolationAlgorithm("bad"),
+	}, arrow.BinaryTypes.Binary)
+	require.Error(t, err)
 }
 
 func newFiveRowWKBRecord(t *testing.T, mem memory.Allocator, typ *geoarrow.WKBType) arrow.RecordBatch {

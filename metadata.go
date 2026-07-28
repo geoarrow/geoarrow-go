@@ -1,6 +1,8 @@
 package geoarrow
 
 import (
+	"bytes"
+
 	json "github.com/goccy/go-json"
 )
 
@@ -49,4 +51,41 @@ type Metadata struct {
 // NewMetadata creates a new Metadata instance with default values (empty CRS and planar edges)
 func NewMetadata() Metadata {
 	return Metadata{}
+}
+
+// SetParquetCRS stores a Parquet CRS string in GeoArrow metadata. Parquet CRS
+// values are opaque strings; GeoArrow metadata requires non-PROJJSON CRS values
+// to be encoded as JSON strings and tagged with a CRS type.
+func (m *Metadata) SetParquetCRS(crs string) {
+	if crs == "" {
+		m.CRS = nil
+		m.CRSType = ""
+		return
+	}
+
+	raw := json.RawMessage(crs)
+	if json.Valid(raw) && bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{")) {
+		m.CRS = raw
+		m.CRSType = CRSTypePROJJSON
+		return
+	}
+
+	m.CRS, _ = json.Marshal(crs)
+	m.CRSType = CRSTypeSRID
+}
+
+// ParquetCRS returns the CRS value to write into a Parquet logical type.
+func (m Metadata) ParquetCRS() string {
+	if len(m.CRS) == 0 {
+		return ""
+	}
+
+	if m.CRSType != CRSTypePROJJSON {
+		var crs string
+		if err := json.Unmarshal(m.CRS, &crs); err == nil {
+			return crs
+		}
+	}
+
+	return string(m.CRS)
 }

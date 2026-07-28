@@ -127,10 +127,10 @@ func (wkb *WKBType) ParquetLogicalType() schema.LogicalType {
 	if wkb.meta.Edges != "" {
 		return schema.GeographyLogicalType{
 			Algorithm: schema.GeographyEdgeInterpolationAlgorithm(wkb.meta.Edges),
-			Crs:       string(wkb.meta.CRS),
+			Crs:       wkb.meta.ParquetCRS(),
 		}
 	}
-	return schema.GeometryLogicalType{Crs: string(wkb.meta.CRS)}
+	return schema.GeometryLogicalType{Crs: wkb.meta.ParquetCRS()}
 }
 
 // ArrowTypeFromParquet maps Parquet GEOMETRY and GEOGRAPHY logical byte-array
@@ -158,13 +158,17 @@ func (*WKBType) ArrowTypeFromParquet(logical schema.LogicalType, storageType arr
 	switch logical := logical.(type) {
 	case schema.GeometryLogicalType:
 		if logical.IsCRSSet() {
-			meta.CRS = json.RawMessage(logical.CRS())
+			meta.SetParquetCRS(logical.CRS())
 		}
 	case schema.GeographyLogicalType:
 		if logical.IsCRSSet() {
-			meta.CRS = json.RawMessage(logical.CRS())
+			meta.SetParquetCRS(logical.CRS())
 		}
-		meta.Edges = EdgeInterpolation(logical.EdgeInterpolationAlgorithm())
+		edges, ok := edgeInterpolationFromParquet(logical.EdgeInterpolationAlgorithm())
+		if !ok {
+			return nil, fmt.Errorf("unsupported Parquet geography edge interpolation algorithm: %s", logical.EdgeInterpolationAlgorithm())
+		}
+		meta.Edges = edges
 	default:
 		return nil, nil
 	}
@@ -172,6 +176,27 @@ func (*WKBType) ArrowTypeFromParquet(logical schema.LogicalType, storageType arr
 	// Return a new type instead of the registered receiver so the storage type
 	// and metadata match the Parquet column being converted.
 	return NewWKBType(storageOpt, WKBWithMetadata(meta)), nil
+}
+
+// edgeInterpolationFromParquet maps Parquet geography edge interpolation values
+// to GeoArrow metadata values. This is semantically the same but is mapped
+// explicitly to ensure there is no implicit usage of unknown/typo values and things
+// are kept in sync between geoarrow-go and arrow-go
+func edgeInterpolationFromParquet(alg schema.GeographyEdgeInterpolationAlgorithm) (EdgeInterpolation, bool) {
+	switch alg {
+	case schema.GeographyEdgeSpherical:
+		return EdgeSpherical, true
+	case schema.GeographyEdgeVincenty:
+		return EdgeVincenty, true
+	case schema.GeographyEdgeThomas:
+		return EdgeThomas, true
+	case schema.GeographyEdgeAndoyer:
+		return EdgeAndoyer, true
+	case schema.GeographyEdgeKarney:
+		return EdgeKarney, true
+	default:
+		return "", false
+	}
 }
 
 func (*WKBType) Deserialize(storageType arrow.DataType, data string) (arrow.ExtensionType, error) {
