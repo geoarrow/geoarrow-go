@@ -2,6 +2,8 @@ package geoarrow
 
 import (
 	"bytes"
+	"strconv"
+	"strings"
 
 	json "github.com/goccy/go-json"
 )
@@ -53,9 +55,22 @@ func NewMetadata() Metadata {
 	return Metadata{}
 }
 
+const (
+	// parquetSRIDPrefix is the Parquet spec prefix for CRS values that are
+	// integer identifiers from a catalog, e.g. "srid:4326".
+	parquetSRIDPrefix = "srid:"
+	// parquetDefaultCRS is the CRS Parquet assumes when none is written.
+	parquetDefaultCRS = "OGC:CRS84"
+)
+
 // SetCRSString stores a Parquet CRS string in GeoArrow metadata. Parquet CRS
 // values are opaque strings; GeoArrow metadata requires non-PROJJSON CRS values
-// to be encoded as JSON strings and tagged with a CRS type.
+// to be encoded as JSON strings and tagged with a CRS type where one is known.
+//
+//   - Inline PROJJSON objects are stored as-is with crs_type "projjson".
+//   - "srid:<id>" values are stored as "<id>" with crs_type "srid".
+//   - Any other string (e.g. "OGC:CRS84" or a "projjson:<key>" reference)
+//     is stored as a JSON string with no crs_type.
 func (m *Metadata) SetCRSString(crs string) {
 	if crs == "" {
 		m.CRS = nil
@@ -70,22 +85,67 @@ func (m *Metadata) SetCRSString(crs string) {
 		return
 	}
 
+	if id, ok := strings.CutPrefix(crs, parquetSRIDPrefix); ok && id != "" {
+		m.CRS, _ = json.Marshal(id)
+		m.CRSType = CRSTypeSRID
+		return
+	}
+
 	m.CRS, _ = json.Marshal(crs)
-	m.CRSType = CRSTypeSRID
+	m.CRSType = ""
 }
 
-// ParquetCRS returns the CRS value to write into a Parquet logical type.
+// ParquetCRS returns the CRS value to write into a Parquet logical type,
+// following the Parquet geospatial spec:
+//
+//   - An empty string is returned for the default OGC:CRS84 so the CRS is
+//     omitted from the logical type.
+//   - SRIDs are written as "srid:<id>".
+//   - Inline PROJJSON and other strings are written as-is.
 func (m Metadata) ParquetCRS() string {
 	if len(m.CRS) == 0 {
 		return ""
 	}
 
-	if m.CRSType != CRSTypePROJJSON {
-		var crs string
-		if err := json.Unmarshal(m.CRS, &crs); err == nil {
-			return crs
+	var crs string
+	if err := json.Unmarshal(m.CRS, &crs); err != nil {
+		// Not a JSON string, e.g. an inline PROJJSON object.
+		if isPROJJSONCRS84(m.CRS) {
+			return ""
 		}
+		return string(m.CRS)
 	}
 
-	return string(m.CRS)
+	switch {
+	case crs == "":
+		return ""
+	case m.CRSType == CRSTypeSRID:
+		if strings.HasPrefix(crs, parquetSRIDPrefix) {
+			return crs
+		}
+		return parquetSRIDPrefix + crs
+	case crs == parquetDefaultCRS:
+		return ""
+	}
+	return crs
+}
+
+// isPROJJSONCRS84 reports whether a PROJJSON object identifies itself as
+// OGC:CRS84 via its "id" member.
+func isPROJJSONCRS84(raw json.RawMessage) bool {
+	var projjson struct {
+		ID *struct {
+			Authority string          `json:"authority"`
+			Code      json.RawMessage `json:"code"`
+		} `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &projjson); err != nil || projjson.ID == nil {
+		return false
+	}
+
+	code := string(projjson.ID.Code)
+	if unquoted, err := strconv.Unquote(code); err == nil {
+		code = unquoted
+	}
+	return projjson.ID.Authority == "OGC" && code == "CRS84"
 }
