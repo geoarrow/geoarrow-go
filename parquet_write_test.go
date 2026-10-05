@@ -2,6 +2,7 @@ package geoarrow_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -69,8 +70,8 @@ func TestE2EWriteReadWKBWithProjJSONCRS(t *testing.T) {
 	require.True(t, ok)
 	require.True(t, arrow.TypeEqual(arrow.BinaryTypes.Binary, wkb.StorageType()))
 	require.Equal(t, crs, wkb.Metadata().ParquetCRS())
-	require.Equal(t, geoarrow.CRSTypeSRID, wkb.Metadata().CRSType)
-	require.JSONEq(t, `{"crs":"projjson:geometry_crs","crs_type":"srid"}`, wkb.Serialize())
+	require.Empty(t, wkb.Metadata().CRSType)
+	require.JSONEq(t, `{"crs":"projjson:geometry_crs"}`, wkb.Serialize())
 	require.True(t, schema.GeometryLogicalType{Crs: crs}.Equals(wkb.ParquetLogicalType()))
 }
 
@@ -114,8 +115,8 @@ func TestE2EReadTableWKBWithProjJSONCRS(t *testing.T) {
 	require.True(t, ok)
 	require.True(t, arrow.TypeEqual(arrow.BinaryTypes.Binary, wkbType.StorageType()))
 	require.Equal(t, crs, wkbType.Metadata().ParquetCRS())
-	require.Equal(t, geoarrow.CRSTypeSRID, wkbType.Metadata().CRSType)
-	require.JSONEq(t, `{"crs":"projjson:geometry_crs","crs_type":"srid"}`, wkbType.Serialize())
+	require.Empty(t, wkbType.Metadata().CRSType)
+	require.JSONEq(t, `{"crs":"projjson:geometry_crs"}`, wkbType.Serialize())
 
 	// Reading data should produce a usable WKB extension array, not just a
 	// binary array with the right schema metadata.
@@ -153,9 +154,9 @@ func TestFromParquetGeometryLogicalTypeToWKB(t *testing.T) {
 	require.True(t, ok)
 	require.True(t, arrow.TypeEqual(arrow.BinaryTypes.Binary, wkb.StorageType()))
 	require.Equal(t, "EPSG:4326", wkb.Metadata().ParquetCRS())
-	require.Equal(t, geoarrow.CRSTypeSRID, wkb.Metadata().CRSType)
+	require.Empty(t, wkb.Metadata().CRSType)
 	require.Equal(t, geoarrow.EdgePlanar, wkb.Metadata().Edges)
-	require.JSONEq(t, `{"crs":"EPSG:4326","crs_type":"srid"}`, wkb.Serialize())
+	require.JSONEq(t, `{"crs":"EPSG:4326"}`, wkb.Serialize())
 	// The reconstructed WKB type should write back to an equivalent Parquet
 	// logical type.
 	require.True(t, logical.Equals(wkb.ParquetLogicalType()))
@@ -195,11 +196,89 @@ func TestFromParquetGeographyLogicalTypeToWKB(t *testing.T) {
 	wkb, ok := arrsc.Field(0).Type.(*geoarrow.WKBType)
 	require.True(t, ok)
 	require.True(t, arrow.TypeEqual(arrow.BinaryTypes.Binary, wkb.StorageType()))
-	require.Equal(t, "OGC:CRS84", wkb.Metadata().ParquetCRS())
-	require.Equal(t, geoarrow.CRSTypeSRID, wkb.Metadata().CRSType)
+	require.Empty(t, wkb.Metadata().CRSType)
 	require.Equal(t, geoarrow.EdgeKarney, wkb.Metadata().Edges)
-	require.JSONEq(t, `{"crs":"OGC:CRS84","crs_type":"srid","edges":"karney"}`, wkb.Serialize())
-	require.True(t, logical.Equals(wkb.ParquetLogicalType()))
+	require.JSONEq(t, `{"crs":"OGC:CRS84","edges":"karney"}`, wkb.Serialize())
+	// OGC:CRS84 is the Parquet default, so it is omitted when written back.
+	require.Empty(t, wkb.Metadata().ParquetCRS())
+	require.True(t, schema.GeographyLogicalType{Algorithm: schema.GeographyEdgeKarney}.Equals(wkb.ParquetLogicalType()))
+}
+
+func TestE2EWriteReadWKBWithSRIDCRS(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	// GeoArrow stores SRIDs bare with crs_type "srid"; the Parquet spec
+	// requires them to be written with a "srid:" prefix.
+	rec := newFiveRowWKBRecord(t, mem, geoarrow.NewWKBType(geoarrow.WKBWithMetadata(geoarrow.Metadata{
+		CRS:     json.RawMessage(`"4326"`),
+		CRSType: geoarrow.CRSTypeSRID,
+	})))
+	defer rec.Release()
+
+	path := writeRecordToParquetFile(t, mem, rec, "geometry_srid.parquet")
+	assertParquetLogicalType(t, path, schema.GeometryLogicalType{Crs: "srid:4326"})
+
+	// Reading strips the prefix back off so the GeoArrow metadata round-trips.
+	arrsc := readParquetArrowSchema(t, mem, path)
+	wkb, ok := arrsc.Field(0).Type.(*geoarrow.WKBType)
+	require.True(t, ok)
+	require.Equal(t, geoarrow.CRSTypeSRID, wkb.Metadata().CRSType)
+	require.JSONEq(t, `{"crs":"4326","crs_type":"srid"}`, wkb.Serialize())
+	require.Equal(t, "srid:4326", wkb.Metadata().ParquetCRS())
+}
+
+func TestE2EWriteWKBOmitsDefaultCRS(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	rec := newFiveRowWKBRecord(t, mem, geoarrow.NewWKBType(geoarrow.WKBWithMetadata(geoarrow.Metadata{
+		CRS:     json.RawMessage(`"OGC:CRS84"`),
+		CRSType: geoarrow.CRSTypeAuthorityCode,
+	})))
+	defer rec.Release()
+
+	path := writeRecordToParquetFile(t, mem, rec, "geometry_default_crs.parquet")
+	assertParquetLogicalType(t, path, schema.GeometryLogicalType{})
+}
+
+func TestParquetCRS(t *testing.T) {
+	tests := []struct {
+		name string
+		meta geoarrow.Metadata
+		want string
+	}{
+		{"unset", geoarrow.Metadata{}, ""},
+		{"srid", geoarrow.Metadata{CRS: json.RawMessage(`"4326"`), CRSType: geoarrow.CRSTypeSRID}, "srid:4326"},
+		{"srid already prefixed", geoarrow.Metadata{CRS: json.RawMessage(`"srid:4326"`), CRSType: geoarrow.CRSTypeSRID}, "srid:4326"},
+		{"default authority code", geoarrow.Metadata{CRS: json.RawMessage(`"OGC:CRS84"`), CRSType: geoarrow.CRSTypeAuthorityCode}, ""},
+		{"default untyped", geoarrow.Metadata{CRS: json.RawMessage(`"OGC:CRS84"`)}, ""},
+		{"authority code", geoarrow.Metadata{CRS: json.RawMessage(`"EPSG:3857"`), CRSType: geoarrow.CRSTypeAuthorityCode}, "EPSG:3857"},
+		{"projjson reference", geoarrow.Metadata{CRS: json.RawMessage(`"projjson:geometry_crs"`)}, "projjson:geometry_crs"},
+		{
+			"projjson crs84",
+			geoarrow.Metadata{CRS: json.RawMessage(`{"name":"WGS 84","id":{"authority":"OGC","code":"CRS84"}}`), CRSType: geoarrow.CRSTypePROJJSON},
+			"",
+		},
+		{
+			"projjson other",
+			geoarrow.Metadata{CRS: json.RawMessage(`{"name":"WGS 84","id":{"authority":"EPSG","code":4326}}`), CRSType: geoarrow.CRSTypePROJJSON},
+			`{"name":"WGS 84","id":{"authority":"EPSG","code":4326}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, tt.meta.ParquetCRS())
+		})
+	}
+}
+
+func TestSetCRSStringParsesSRIDPrefix(t *testing.T) {
+	meta := geoarrow.NewMetadata()
+	meta.SetCRSString("srid:3857")
+	require.Equal(t, geoarrow.CRSTypeSRID, meta.CRSType)
+	require.JSONEq(t, `"3857"`, string(meta.CRS))
+	require.Equal(t, "srid:3857", meta.ParquetCRS())
 }
 
 func TestFromParquetGeographyLogicalTypeRejectsUnknownEdgeAlgorithm(t *testing.T) {
