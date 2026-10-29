@@ -21,9 +21,11 @@ const (
 )
 
 func init() {
-	arrow.RegisterExtensionType(NewWKBType())
-	arrow.RegisterExtensionType(NewPointType())
-	arrow.RegisterExtensionType(NewPolygonType())
+	for _, typ := range []arrow.ExtensionType{NewWKBType(), NewPointType(), NewPolygonType()} {
+		if err := arrow.RegisterExtensionType(typ); err != nil {
+			panic(err)
+		}
+	}
 }
 
 // GeometryType represents a GeoArrow geometry type with arbitrary

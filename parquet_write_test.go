@@ -92,11 +92,10 @@ func TestE2EReadTableWKBWithProjJSONCRS(t *testing.T) {
 	path := writeRecordToParquetFile(t, mem, rec, "geometry_projjson_read_table.parquet")
 	in, err := os.Open(path)
 	require.NoError(t, err)
-	defer in.Close()
 
 	parquetReader, err := file.NewParquetReader(in)
 	require.NoError(t, err)
-	defer parquetReader.Close()
+	defer func() { require.NoError(t, parquetReader.Close()) }()
 
 	// Without ARROW:schema metadata, pqarrow must reconstruct WKB from the
 	// Parquet GEOMETRY logical type via ArrowTypeFromParquet.
@@ -318,7 +317,7 @@ func newSingleColumnParquetSchema(t *testing.T, name string, logical schema.Logi
 		schema.FieldList{node}, -1)))
 }
 
-func writeRecordToParquetFile(t *testing.T, mem memory.Allocator, rec arrow.Record, name string) string {
+func writeRecordToParquetFile(t *testing.T, mem memory.Allocator, rec arrow.RecordBatch, name string) string {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), name)
@@ -358,11 +357,10 @@ func assertParquetLogicalType(t *testing.T, path string, want schema.LogicalType
 
 	in, err := os.Open(path)
 	require.NoError(t, err)
-	defer in.Close()
 
 	parquetReader, err := file.NewParquetReader(in)
 	require.NoError(t, err)
-	defer parquetReader.Close()
+	defer func() { require.NoError(t, parquetReader.Close()) }()
 
 	require.EqualValues(t, 5, parquetReader.MetaData().NumRows)
 	require.Equal(t, 1, parquetReader.MetaData().Schema.NumColumns())
@@ -375,11 +373,10 @@ func readParquetArrowSchema(t *testing.T, mem memory.Allocator, path string) *ar
 
 	in, err := os.Open(path)
 	require.NoError(t, err)
-	defer in.Close()
 
 	parquetReader, err := file.NewParquetReader(in)
 	require.NoError(t, err)
-	defer parquetReader.Close()
+	defer func() { require.NoError(t, parquetReader.Close()) }()
 
 	arrowReader, err := pqarrow.NewFileReader(parquetReader, pqarrow.ArrowReadProperties{}, mem)
 	require.NoError(t, err)
