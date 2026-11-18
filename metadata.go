@@ -56,26 +56,46 @@ func NewMetadata() Metadata {
 }
 
 const (
-	// parquetSRIDPrefix is the Parquet spec prefix for CRS values that are
-	// integer identifiers from a catalog, e.g. "srid:4326".
+	// parquetSRIDPrefix is the Parquet spec prefix for CRS values given as a
+	// spatial reference identifier (SRID), e.g. "srid:4326". SRIDs are opaque
+	// integer keys whose meaning depends on the producer (such as a database's
+	// spatial_ref_sys table), so they are not interpreted as EPSG codes.
+	//
+	// The prefix is matched case-sensitively, as the Parquet spec writes it and
+	// as arrow-rs matches it, so e.g. "SRID:0" is not recognized as an SRID.
 	parquetSRIDPrefix = "srid:"
 	// parquetDefaultCRS is the CRS Parquet assumes when none is written.
 	parquetDefaultCRS = "OGC:CRS84"
+	// parquetUnknownSRID is the SRID conventionally used to mean an unknown CRS
+	// (as arrow-rs does). The Parquet spec only shows "srid:0" as an example and
+	// does not define it as unknown. Parquet cannot express "unknown" by
+	// omitting the CRS, since an omitted CRS means parquetDefaultCRS, while an
+	// omitted GeoArrow CRS means unknown.
+	parquetUnknownSRID = "0"
 )
 
 // SetCRSString stores a Parquet CRS string in GeoArrow metadata. Parquet CRS
 // values are opaque strings; GeoArrow metadata requires non-PROJJSON CRS values
 // to be encoded as JSON strings and tagged with a CRS type where one is known.
 //
+//   - An empty string (Parquet's unset CRS) means the Parquet default and is
+//     stored as "OGC:CRS84", since an omitted GeoArrow CRS means unknown.
+//   - "srid:0" is the conventional unknown-CRS value (used by arrow-rs, but not
+//     defined as such by the Parquet spec) and leaves the GeoArrow CRS omitted.
+//     The prefix is matched case-sensitively, so "SRID:0" is not unknown.
 //   - Inline PROJJSON objects are stored as-is with crs_type "projjson".
-//   - "srid:<id>" values are stored as "<id>" with crs_type "srid".
-//   - Any other string (e.g. "OGC:CRS84" or a "projjson:<key>" reference)
-//     is stored as a JSON string with no crs_type.
+//   - Any other string, including other "srid:<id>" values (kept whole, as
+//     arrow-rs does, rather than split into "<id>" plus crs_type "srid"),
+//     "OGC:CRS84" or a "projjson:<key>" reference, is stored as a JSON string
+//     with no crs_type.
+//
+// The unknown-CRS rules (unset <-> "OGC:CRS84", "srid:0" <-> omitted) follow
+// issue #12 and arrow-rs; they are not established as identical in Arrow C++ or
+// GDAL. Canonicalizing WGS84 (see ParquetCRS) is the behavior reported for
+// arrow-rs, Arrow C++ and GDAL.
 func (m *Metadata) SetCRSString(crs string) {
 	if crs == "" {
-		m.CRS = nil
-		m.CRSType = ""
-		return
+		crs = parquetDefaultCRS
 	}
 
 	raw := json.RawMessage(crs)
@@ -85,9 +105,9 @@ func (m *Metadata) SetCRSString(crs string) {
 		return
 	}
 
-	if id, ok := strings.CutPrefix(crs, parquetSRIDPrefix); ok && id != "" {
-		m.CRS, _ = json.Marshal(id)
-		m.CRSType = CRSTypeSRID
+	if isUnknownSRID(crs) {
+		m.CRS = nil
+		m.CRSType = ""
 		return
 	}
 
@@ -98,41 +118,54 @@ func (m *Metadata) SetCRSString(crs string) {
 // ParquetCRS returns the CRS value to write into a Parquet logical type,
 // following the Parquet geospatial spec:
 //
-//   - An empty string is returned for the default OGC:CRS84 so the CRS is
-//     omitted from the logical type.
-//   - SRIDs are written as "srid:<id>".
-//   - Inline PROJJSON and other strings are written as-is.
+//   - An omitted (unknown) GeoArrow CRS is written as "srid:0", because an
+//     unset Parquet CRS means OGC:CRS84.
+//   - An explicit JSON null is treated the same as an omitted CRS.
+//   - An empty string is returned for OGC:CRS84 and EPSG:4326 (as a string or
+//     as PROJJSON identifying either) so the CRS is omitted from the logical
+//     type. This WGS84 canonicalization is the behavior reported for arrow-rs,
+//     Arrow C++ and GDAL; the "srid:0" unknown-CRS rule follows arrow-rs.
+//   - A bare SRID with crs_type "srid" (e.g. "4326" from another producer) is
+//     written as "srid:<id>".
+//   - Inline PROJJSON and other strings, including "srid:<id>" values, are
+//     written as-is.
 func (m Metadata) ParquetCRS() string {
-	if len(m.CRS) == 0 {
-		return ""
+	if crs := bytes.TrimSpace(m.CRS); len(crs) == 0 || bytes.Equal(crs, []byte("null")) {
+		return parquetSRIDPrefix + parquetUnknownSRID
 	}
 
 	var crs string
 	if err := json.Unmarshal(m.CRS, &crs); err != nil {
 		// Not a JSON string, e.g. an inline PROJJSON object.
-		if isPROJJSONCRS84(m.CRS) {
+		if isPROJJSONDefaultCRS(m.CRS) {
 			return ""
 		}
 		return string(m.CRS)
 	}
 
-	switch {
-	case crs == "":
+	if crs == "" {
 		return ""
-	case m.CRSType == CRSTypeSRID:
-		if strings.HasPrefix(crs, parquetSRIDPrefix) {
-			return crs
+	}
+	if m.CRSType == CRSTypeSRID {
+		if !strings.HasPrefix(crs, parquetSRIDPrefix) {
+			crs = parquetSRIDPrefix + crs
 		}
-		return parquetSRIDPrefix + crs
-	case crs == parquetDefaultCRS:
+	}
+
+	if crs == parquetDefaultCRS || crs == "EPSG:4326" {
 		return ""
 	}
 	return crs
 }
 
-// isPROJJSONCRS84 reports whether a PROJJSON object identifies itself as
-// OGC:CRS84 via its "id" member.
-func isPROJJSONCRS84(raw json.RawMessage) bool {
+// isUnknownSRID reports whether crs is the unknown-CRS SRID, "srid:0".
+func isUnknownSRID(crs string) bool {
+	return crs == parquetSRIDPrefix+parquetUnknownSRID
+}
+
+// isPROJJSONDefaultCRS reports whether a PROJJSON object identifies itself as
+// OGC:CRS84 or EPSG:4326 via its "id" member.
+func isPROJJSONDefaultCRS(raw json.RawMessage) bool {
 	var projjson struct {
 		ID *struct {
 			Authority string          `json:"authority"`
@@ -147,5 +180,11 @@ func isPROJJSONCRS84(raw json.RawMessage) bool {
 	if unquoted, err := strconv.Unquote(code); err == nil {
 		code = unquoted
 	}
-	return projjson.ID.Authority == "OGC" && code == "CRS84"
+	switch projjson.ID.Authority {
+	case "OGC":
+		return code == "CRS84"
+	case "EPSG":
+		return code == "4326"
+	}
+	return false
 }
