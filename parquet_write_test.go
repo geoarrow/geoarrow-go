@@ -1,6 +1,7 @@
 package geoarrow_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -26,7 +27,9 @@ func TestE2EWriteArrowToParquetGeometry(t *testing.T) {
 	defer rec.Release()
 
 	path := writeRecordToParquetFile(t, mem, rec, "geometry.parquet")
-	assertParquetLogicalType(t, path, schema.GeometryLogicalType{})
+	// An omitted GeoArrow CRS is unknown. Parquet writes that as srid:0 since
+	// an unset Parquet CRS means OGC:CRS84.
+	assertParquetLogicalType(t, path, schema.GeometryLogicalType{Crs: "srid:0"})
 }
 
 func TestE2EWriteArrowToParquetGeography(t *testing.T) {
@@ -40,6 +43,7 @@ func TestE2EWriteArrowToParquetGeography(t *testing.T) {
 
 	path := writeRecordToParquetFile(t, mem, rec, "geography.parquet")
 	assertParquetLogicalType(t, path, schema.GeographyLogicalType{
+		Crs:       "srid:0",
 		Algorithm: schema.GeographyEdgeSpherical,
 	})
 }
@@ -152,13 +156,13 @@ func TestFromParquetGeometryLogicalTypeToWKB(t *testing.T) {
 	wkb, ok := arrsc.Field(0).Type.(*geoarrow.WKBType)
 	require.True(t, ok)
 	require.True(t, arrow.TypeEqual(arrow.BinaryTypes.Binary, wkb.StorageType()))
-	require.Equal(t, "EPSG:4326", wkb.Metadata().ParquetCRS())
 	require.Empty(t, wkb.Metadata().CRSType)
 	require.Equal(t, geoarrow.EdgePlanar, wkb.Metadata().Edges)
 	require.JSONEq(t, `{"crs":"EPSG:4326"}`, wkb.Serialize())
-	// The reconstructed WKB type should write back to an equivalent Parquet
-	// logical type.
-	require.True(t, logical.Equals(wkb.ParquetLogicalType()))
+	// EPSG:4326 is canonicalized to the Parquet default (an unset CRS) when
+	// written back, matching arrow-rs, Arrow C++ and GDAL.
+	require.Empty(t, wkb.Metadata().ParquetCRS())
+	require.True(t, schema.GeometryLogicalType{}.Equals(wkb.ParquetLogicalType()))
 }
 
 func TestFromParquetGeometryLogicalTypeWithProjJSONToWKB(t *testing.T) {
@@ -218,12 +222,13 @@ func TestE2EWriteReadWKBWithSRIDCRS(t *testing.T) {
 	path := writeRecordToParquetFile(t, mem, rec, "geometry_srid.parquet")
 	assertParquetLogicalType(t, path, schema.GeometryLogicalType{Crs: "srid:4326"})
 
-	// Reading strips the prefix back off so the GeoArrow metadata round-trips.
+	// Reading keeps the Parquet SRID whole, as arrow-rs does, rather than
+	// splitting it into a bare id plus crs_type "srid".
 	arrsc := readParquetArrowSchema(t, mem, path)
 	wkb, ok := arrsc.Field(0).Type.(*geoarrow.WKBType)
 	require.True(t, ok)
-	require.Equal(t, geoarrow.CRSTypeSRID, wkb.Metadata().CRSType)
-	require.JSONEq(t, `{"crs":"4326","crs_type":"srid"}`, wkb.Serialize())
+	require.Empty(t, wkb.Metadata().CRSType)
+	require.JSONEq(t, `{"crs":"srid:4326"}`, wkb.Serialize())
 	require.Equal(t, "srid:4326", wkb.Metadata().ParquetCRS())
 }
 
@@ -247,9 +252,19 @@ func TestParquetCRS(t *testing.T) {
 		meta geoarrow.Metadata
 		want string
 	}{
-		{"unset", geoarrow.Metadata{}, ""},
+		{"omitted is unknown", geoarrow.Metadata{}, "srid:0"},
+		{"json null is unknown", geoarrow.Metadata{CRS: json.RawMessage(`null`)}, "srid:0"},
+		{"json null with whitespace is unknown", geoarrow.Metadata{CRS: json.RawMessage(` null `)}, "srid:0"},
+		{"srid unknown", geoarrow.Metadata{CRS: json.RawMessage(`"0"`), CRSType: geoarrow.CRSTypeSRID}, "srid:0"},
+		{"epsg 4326 authority code", geoarrow.Metadata{CRS: json.RawMessage(`"EPSG:4326"`), CRSType: geoarrow.CRSTypeAuthorityCode}, ""},
+		{"epsg 4326 untyped", geoarrow.Metadata{CRS: json.RawMessage(`"EPSG:4326"`)}, ""},
 		{"srid", geoarrow.Metadata{CRS: json.RawMessage(`"4326"`), CRSType: geoarrow.CRSTypeSRID}, "srid:4326"},
 		{"srid already prefixed", geoarrow.Metadata{CRS: json.RawMessage(`"srid:4326"`), CRSType: geoarrow.CRSTypeSRID}, "srid:4326"},
+		{"srid uppercase prefix with srid type", geoarrow.Metadata{CRS: json.RawMessage(`"SRID:4326"`), CRSType: geoarrow.CRSTypeSRID}, "SRID:4326"},
+		{"srid string without type", geoarrow.Metadata{CRS: json.RawMessage(`"srid:4326"`)}, "srid:4326"},
+		{"srid:0 string is unknown", geoarrow.Metadata{CRS: json.RawMessage(`"srid:0"`)}, "srid:0"},
+		{"SRID:0 string canonicalizes", geoarrow.Metadata{CRS: json.RawMessage(`"SRID:0"`)}, "srid:0"},
+		{"Srid:0 with srid type canonicalizes", geoarrow.Metadata{CRS: json.RawMessage(`"Srid:0"`), CRSType: geoarrow.CRSTypeSRID}, "srid:0"},
 		{"default authority code", geoarrow.Metadata{CRS: json.RawMessage(`"OGC:CRS84"`), CRSType: geoarrow.CRSTypeAuthorityCode}, ""},
 		{"default untyped", geoarrow.Metadata{CRS: json.RawMessage(`"OGC:CRS84"`)}, ""},
 		{"authority code", geoarrow.Metadata{CRS: json.RawMessage(`"EPSG:3857"`), CRSType: geoarrow.CRSTypeAuthorityCode}, "EPSG:3857"},
@@ -260,9 +275,24 @@ func TestParquetCRS(t *testing.T) {
 			"",
 		},
 		{
-			"projjson other",
+			"projjson epsg 4326",
 			geoarrow.Metadata{CRS: json.RawMessage(`{"name":"WGS 84","id":{"authority":"EPSG","code":4326}}`), CRSType: geoarrow.CRSTypePROJJSON},
-			`{"name":"WGS 84","id":{"authority":"EPSG","code":4326}}`,
+			"",
+		},
+		{
+			"projjson epsg 4326 string code",
+			geoarrow.Metadata{CRS: json.RawMessage(`{"name":"WGS 84","id":{"authority":"EPSG","code":"4326"}}`)},
+			"",
+		},
+		{
+			"projjson other",
+			geoarrow.Metadata{CRS: json.RawMessage(`{"name":"Pseudo-Mercator","id":{"authority":"EPSG","code":3857}}`), CRSType: geoarrow.CRSTypePROJJSON},
+			`{"name":"Pseudo-Mercator","id":{"authority":"EPSG","code":3857}}`,
+		},
+		{
+			"projjson without id",
+			geoarrow.Metadata{CRS: json.RawMessage(`{"name":"WGS 84"}`), CRSType: geoarrow.CRSTypePROJJSON},
+			`{"name":"WGS 84"}`,
 		},
 	}
 	for _, tt := range tests {
@@ -272,12 +302,231 @@ func TestParquetCRS(t *testing.T) {
 	}
 }
 
-func TestSetCRSStringParsesSRIDPrefix(t *testing.T) {
+func TestSetCRSStringKeepsSRIDWhole(t *testing.T) {
 	meta := geoarrow.NewMetadata()
 	meta.SetCRSString("srid:3857")
-	require.Equal(t, geoarrow.CRSTypeSRID, meta.CRSType)
-	require.JSONEq(t, `"3857"`, string(meta.CRS))
+	require.Empty(t, meta.CRSType)
+	require.JSONEq(t, `"srid:3857"`, string(meta.CRS))
 	require.Equal(t, "srid:3857", meta.ParquetCRS())
+}
+
+// TestSetCRSStringFromParquet covers the Parquet to GeoArrow CRS mapping, which
+// follows arrow-rs: an unset Parquet CRS is OGC:CRS84, and srid:0 is unknown.
+func TestSetCRSStringFromParquet(t *testing.T) {
+	tests := []struct {
+		name    string
+		parquet string
+		wantCRS string // empty means the GeoArrow CRS is omitted
+	}{
+		{"unset is OGC:CRS84", "", `"OGC:CRS84"`},
+		{"explicit OGC:CRS84", "OGC:CRS84", `"OGC:CRS84"`},
+		{"srid:0 is unknown", "srid:0", ""},
+		{"SRID:0 is unknown", "SRID:0", ""},
+		{"Srid:0 is unknown", "Srid:0", ""},
+		{"other srid", "srid:3857", `"srid:3857"`},
+		{"other srid uppercase", "SRID:3857", `"SRID:3857"`},
+		{"srid:00 is not unknown", "srid:00", `"srid:00"`},
+		{"other authority code", "EPSG:3857", `"EPSG:3857"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meta := geoarrow.NewMetadata()
+			meta.SetCRSString(tt.parquet)
+			if tt.wantCRS == "" {
+				require.Empty(t, meta.CRS)
+				require.Empty(t, meta.CRSType)
+				return
+			}
+			require.JSONEq(t, tt.wantCRS, string(meta.CRS))
+			require.Empty(t, meta.CRSType)
+		})
+	}
+}
+
+// TestParquetCRSRoundTrips checks the cases from the arrow-rs conformance
+// table survive a GeoArrow -> Parquet -> GeoArrow round trip.
+func TestParquetCRSRoundTrips(t *testing.T) {
+	roundTrip := func(meta geoarrow.Metadata) geoarrow.Metadata {
+		logical := geoarrow.NewWKBType(geoarrow.WKBWithMetadata(meta)).ParquetLogicalType()
+		arrsc, err := pqarrow.FromParquet(newSingleColumnParquetSchema(t, "geometry", logical), nil, nil)
+		require.NoError(t, err)
+		wkb, ok := arrsc.Field(0).Type.(*geoarrow.WKBType)
+		require.True(t, ok)
+		return wkb.Metadata()
+	}
+
+	t.Run("unknown stays unknown", func(t *testing.T) {
+		require.Empty(t, roundTrip(geoarrow.Metadata{}).CRS)
+	})
+	t.Run("OGC:CRS84 stays OGC:CRS84", func(t *testing.T) {
+		got := roundTrip(geoarrow.Metadata{CRS: json.RawMessage(`"OGC:CRS84"`), CRSType: geoarrow.CRSTypeAuthorityCode})
+		require.JSONEq(t, `"OGC:CRS84"`, string(got.CRS))
+	})
+	t.Run("EPSG:4326 canonicalizes to OGC:CRS84", func(t *testing.T) {
+		got := roundTrip(geoarrow.Metadata{CRS: json.RawMessage(`"EPSG:4326"`), CRSType: geoarrow.CRSTypeAuthorityCode})
+		require.JSONEq(t, `"OGC:CRS84"`, string(got.CRS))
+	})
+	t.Run("EPSG:4326 PROJJSON canonicalizes to OGC:CRS84", func(t *testing.T) {
+		got := roundTrip(geoarrow.Metadata{
+			CRS:     json.RawMessage(`{"name":"WGS 84","id":{"authority":"EPSG","code":4326}}`),
+			CRSType: geoarrow.CRSTypePROJJSON,
+		})
+		require.JSONEq(t, `"OGC:CRS84"`, string(got.CRS))
+	})
+	t.Run("bare srid reads back whole", func(t *testing.T) {
+		got := roundTrip(geoarrow.Metadata{CRS: json.RawMessage(`"3857"`), CRSType: geoarrow.CRSTypeSRID})
+		require.JSONEq(t, `"srid:3857"`, string(got.CRS))
+		require.Empty(t, got.CRSType)
+	})
+	t.Run("whole srid is stable", func(t *testing.T) {
+		got := roundTrip(geoarrow.Metadata{CRS: json.RawMessage(`"srid:3857"`)})
+		require.JSONEq(t, `"srid:3857"`, string(got.CRS))
+		require.Empty(t, got.CRSType)
+	})
+	t.Run("uppercase SRID:0 stays unknown", func(t *testing.T) {
+		require.Empty(t, roundTrip(geoarrow.Metadata{CRS: json.RawMessage(`"SRID:0"`)}).CRS)
+	})
+}
+
+// TestParquetCRSFromDeserializedNullCRS checks that an explicit JSON null CRS
+// is treated like an omitted one (unknown), as arrow-rs does, and is therefore
+// written as srid:0 instead of the Parquet default OGC:CRS84.
+func TestParquetCRSFromDeserializedNullCRS(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want schema.LogicalType
+	}{
+		{"geometry omitted", `{}`, schema.GeometryLogicalType{Crs: "srid:0"}},
+		{"geometry null", `{"crs":null}`, schema.GeometryLogicalType{Crs: "srid:0"}},
+		{"geography omitted", `{"edges":"spherical"}`, schema.GeographyLogicalType{Crs: "srid:0", Algorithm: schema.GeographyEdgeSpherical}},
+		{"geography null", `{"crs":null,"edges":"spherical"}`, schema.GeographyLogicalType{Crs: "srid:0", Algorithm: schema.GeographyEdgeSpherical}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dt, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary, tt.data)
+			require.NoError(t, err)
+			wkb, ok := dt.(*geoarrow.WKBType)
+			require.True(t, ok)
+
+			require.Equal(t, "srid:0", wkb.Metadata().ParquetCRS())
+			require.True(t, tt.want.Equals(wkb.ParquetLogicalType()),
+				"want %s, got %s", tt.want, wkb.ParquetLogicalType())
+		})
+	}
+}
+
+// TestE2EParquetCRSWithoutStoredArrowSchema writes and reads real Parquet
+// files with no ARROW:schema metadata, so the GeoArrow type must be rebuilt
+// from the Parquet GEOMETRY/GEOGRAPHY logical type alone. This is the path a
+// downstream reader (e.g. iceberg-go) takes for files written by other tools.
+func TestE2EParquetCRSWithoutStoredArrowSchema(t *testing.T) {
+	const projjsonEPSG4326 = `{"type":"GeographicCRS","name":"WGS 84","id":{"authority":"EPSG","code":4326}}`
+	raw := func(s string) json.RawMessage { return json.RawMessage(s) }
+
+	crsCases := []struct {
+		name string
+		meta geoarrow.Metadata // GeoArrow metadata before writing (edges added per case)
+		// parquetCRS is the CRS stored on the Parquet logical type.
+		parquetCRS string
+		// readCRS and readCRSType are the GeoArrow CRS read back; empty readCRS
+		// means the CRS is omitted (unknown).
+		readCRS     string
+		readCRSType geoarrow.CRSType
+	}{
+		{"unknown", geoarrow.Metadata{}, "srid:0", "", ""},
+		{"OGC:CRS84", geoarrow.Metadata{CRS: raw(`"OGC:CRS84"`), CRSType: geoarrow.CRSTypeAuthorityCode}, "", `"OGC:CRS84"`, ""},
+		{"EPSG:4326", geoarrow.Metadata{CRS: raw(`"EPSG:4326"`), CRSType: geoarrow.CRSTypeAuthorityCode}, "", `"OGC:CRS84"`, ""},
+		{"EPSG:4326 PROJJSON", geoarrow.Metadata{CRS: raw(projjsonEPSG4326), CRSType: geoarrow.CRSTypePROJJSON}, "", `"OGC:CRS84"`, ""},
+		{"other authority code", geoarrow.Metadata{CRS: raw(`"EPSG:3857"`), CRSType: geoarrow.CRSTypeAuthorityCode}, "EPSG:3857", `"EPSG:3857"`, ""},
+		{"srid", geoarrow.Metadata{CRS: raw(`"3857"`), CRSType: geoarrow.CRSTypeSRID}, "srid:3857", `"srid:3857"`, ""},
+		{"uppercase unknown srid", geoarrow.Metadata{CRS: raw(`"SRID:0"`)}, "srid:0", "", ""},
+		{"projjson reference", geoarrow.Metadata{CRS: raw(`"projjson:geo.crs"`)}, "projjson:geo.crs", `"projjson:geo.crs"`, ""},
+	}
+
+	edgeCases := []struct {
+		name  string
+		edges geoarrow.EdgeInterpolation
+		algo  schema.GeographyEdgeInterpolationAlgorithm
+	}{
+		{"geometry", geoarrow.EdgePlanar, ""},
+		{"geography spherical", geoarrow.EdgeSpherical, schema.GeographyEdgeSpherical},
+		{"geography karney", geoarrow.EdgeKarney, schema.GeographyEdgeKarney},
+	}
+
+	for _, crsCase := range crsCases {
+		for _, edgeCase := range edgeCases {
+			t.Run(crsCase.name+"/"+edgeCase.name, func(t *testing.T) {
+				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+				defer mem.AssertSize(t, 0)
+
+				meta := crsCase.meta
+				meta.Edges = edgeCase.edges
+				typ := geoarrow.NewWKBType(geoarrow.WKBWithMetadata(meta))
+
+				// Three rows including a null, to confirm values survive.
+				builder := typ.NewBuilder(mem).(*geoarrow.WKBBuilder)
+				builder.Append(geoarrow.WKBBytes(testWKBPoint))
+				builder.AppendNull()
+				builder.Append(geoarrow.WKBBytes(testWKBPoint))
+				arr := builder.NewArray()
+				builder.Release()
+				defer arr.Release()
+
+				sc := arrow.NewSchema([]arrow.Field{{Name: "geom", Type: typ, Nullable: true}}, nil)
+				rec := array.NewRecordBatch(sc, []arrow.Array{arr}, int64(arr.Len()))
+				defer rec.Release()
+
+				// Deliberately no pqarrow.WithStoreSchema().
+				var buf bytes.Buffer
+				writer, err := pqarrow.NewFileWriter(sc, &buf,
+					parquet.NewWriterProperties(parquet.WithAllocator(mem)),
+					pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(mem)))
+				require.NoError(t, err)
+				require.NoError(t, writer.Write(rec))
+				require.NoError(t, writer.Close())
+
+				rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+				require.NoError(t, err)
+				defer func() { require.NoError(t, rdr.Close()) }()
+				require.Nil(t, rdr.MetaData().KeyValueMetadata().FindValue("ARROW:schema"))
+
+				// The Parquet logical type carries the converted CRS.
+				var wantLogical schema.LogicalType = schema.GeometryLogicalType{Crs: crsCase.parquetCRS}
+				if edgeCase.algo != "" {
+					wantLogical = schema.GeographyLogicalType{Crs: crsCase.parquetCRS, Algorithm: edgeCase.algo}
+				}
+				gotLogical := rdr.MetaData().Schema.Column(0).LogicalType()
+				require.True(t, wantLogical.Equals(gotLogical), "want %s, got %s", wantLogical, gotLogical)
+
+				arrowRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, mem)
+				require.NoError(t, err)
+				tbl, err := arrowRdr.ReadTable(context.Background())
+				require.NoError(t, err)
+				defer tbl.Release()
+
+				// The GeoArrow type is rebuilt from the logical type alone.
+				wkb, ok := tbl.Schema().Field(0).Type.(*geoarrow.WKBType)
+				require.True(t, ok)
+				got := wkb.Metadata()
+				require.Equal(t, edgeCase.edges, got.Edges)
+				require.Equal(t, crsCase.readCRSType, got.CRSType)
+				if crsCase.readCRS == "" {
+					require.Empty(t, got.CRS)
+				} else {
+					require.JSONEq(t, crsCase.readCRS, string(got.CRS))
+				}
+
+				// Values and nulls are intact.
+				wkbArr, ok := tbl.Column(0).Data().Chunk(0).(*geoarrow.WKBArray)
+				require.True(t, ok)
+				require.Equal(t, 3, wkbArr.Len())
+				require.Equal(t, geoarrow.WKBBytes(testWKBPoint), wkbArr.Value(0))
+				require.True(t, wkbArr.IsNull(1))
+				require.Equal(t, geoarrow.WKBBytes(testWKBPoint), wkbArr.Value(2))
+			})
+		}
+	}
 }
 
 func TestFromParquetGeographyLogicalTypeRejectsUnknownEdgeAlgorithm(t *testing.T) {

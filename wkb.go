@@ -157,13 +157,13 @@ func (*WKBType) ArrowTypeFromParquet(logical schema.LogicalType, storageType arr
 	meta := NewMetadata()
 	switch logical := logical.(type) {
 	case schema.GeometryLogicalType:
-		if logical.IsCRSSet() {
-			meta.SetCRSString(logical.CRS())
-		}
+		// An unset Parquet CRS means OGC:CRS84, which SetCRSString maps to
+		// an explicit GeoArrow CRS since an omitted GeoArrow CRS is unknown.
+		meta.SetCRSString(logical.Crs)
 	case schema.GeographyLogicalType:
-		if logical.IsCRSSet() {
-			meta.SetCRSString(logical.CRS())
-		}
+		// An unset Parquet CRS means OGC:CRS84, which SetCRSString maps to
+		// an explicit GeoArrow CRS since an omitted GeoArrow CRS is unknown.
+		meta.SetCRSString(logical.Crs)
 		edges, ok := edgeInterpolationFromParquet(logical.EdgeInterpolationAlgorithm())
 		if !ok {
 			return nil, fmt.Errorf("unsupported Parquet geography edge interpolation algorithm: %s", logical.EdgeInterpolationAlgorithm())
