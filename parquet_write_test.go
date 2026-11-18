@@ -260,11 +260,9 @@ func TestParquetCRS(t *testing.T) {
 		{"epsg 4326 untyped", geoarrow.Metadata{CRS: json.RawMessage(`"EPSG:4326"`)}, ""},
 		{"srid", geoarrow.Metadata{CRS: json.RawMessage(`"4326"`), CRSType: geoarrow.CRSTypeSRID}, "srid:4326"},
 		{"srid already prefixed", geoarrow.Metadata{CRS: json.RawMessage(`"srid:4326"`), CRSType: geoarrow.CRSTypeSRID}, "srid:4326"},
-		{"srid uppercase prefix with srid type", geoarrow.Metadata{CRS: json.RawMessage(`"SRID:4326"`), CRSType: geoarrow.CRSTypeSRID}, "SRID:4326"},
 		{"srid string without type", geoarrow.Metadata{CRS: json.RawMessage(`"srid:4326"`)}, "srid:4326"},
 		{"srid:0 string is unknown", geoarrow.Metadata{CRS: json.RawMessage(`"srid:0"`)}, "srid:0"},
-		{"SRID:0 string canonicalizes", geoarrow.Metadata{CRS: json.RawMessage(`"SRID:0"`)}, "srid:0"},
-		{"Srid:0 with srid type canonicalizes", geoarrow.Metadata{CRS: json.RawMessage(`"Srid:0"`), CRSType: geoarrow.CRSTypeSRID}, "srid:0"},
+		{"SRID:0 string is written as-is", geoarrow.Metadata{CRS: json.RawMessage(`"SRID:0"`)}, "SRID:0"},
 		{"default authority code", geoarrow.Metadata{CRS: json.RawMessage(`"OGC:CRS84"`), CRSType: geoarrow.CRSTypeAuthorityCode}, ""},
 		{"default untyped", geoarrow.Metadata{CRS: json.RawMessage(`"OGC:CRS84"`)}, ""},
 		{"authority code", geoarrow.Metadata{CRS: json.RawMessage(`"EPSG:3857"`), CRSType: geoarrow.CRSTypeAuthorityCode}, "EPSG:3857"},
@@ -321,10 +319,8 @@ func TestSetCRSStringFromParquet(t *testing.T) {
 		{"unset is OGC:CRS84", "", `"OGC:CRS84"`},
 		{"explicit OGC:CRS84", "OGC:CRS84", `"OGC:CRS84"`},
 		{"srid:0 is unknown", "srid:0", ""},
-		{"SRID:0 is unknown", "SRID:0", ""},
-		{"Srid:0 is unknown", "Srid:0", ""},
+		{"SRID:0 is not treated as unknown", "SRID:0", `"SRID:0"`},
 		{"other srid", "srid:3857", `"srid:3857"`},
-		{"other srid uppercase", "SRID:3857", `"SRID:3857"`},
 		{"srid:00 is not unknown", "srid:00", `"srid:00"`},
 		{"other authority code", "EPSG:3857", `"EPSG:3857"`},
 	}
@@ -383,8 +379,9 @@ func TestParquetCRSRoundTrips(t *testing.T) {
 		require.JSONEq(t, `"srid:3857"`, string(got.CRS))
 		require.Empty(t, got.CRSType)
 	})
-	t.Run("uppercase SRID:0 stays unknown", func(t *testing.T) {
-		require.Empty(t, roundTrip(geoarrow.Metadata{CRS: json.RawMessage(`"SRID:0"`)}).CRS)
+	t.Run("uppercase SRID:0 is not treated as unknown", func(t *testing.T) {
+		got := roundTrip(geoarrow.Metadata{CRS: json.RawMessage(`"SRID:0"`)})
+		require.JSONEq(t, `"SRID:0"`, string(got.CRS))
 	})
 }
 
@@ -440,7 +437,7 @@ func TestE2EParquetCRSWithoutStoredArrowSchema(t *testing.T) {
 		{"EPSG:4326 PROJJSON", geoarrow.Metadata{CRS: raw(projjsonEPSG4326), CRSType: geoarrow.CRSTypePROJJSON}, "", `"OGC:CRS84"`, ""},
 		{"other authority code", geoarrow.Metadata{CRS: raw(`"EPSG:3857"`), CRSType: geoarrow.CRSTypeAuthorityCode}, "EPSG:3857", `"EPSG:3857"`, ""},
 		{"srid", geoarrow.Metadata{CRS: raw(`"3857"`), CRSType: geoarrow.CRSTypeSRID}, "srid:3857", `"srid:3857"`, ""},
-		{"uppercase unknown srid", geoarrow.Metadata{CRS: raw(`"SRID:0"`)}, "srid:0", "", ""},
+		{"uppercase SRID:0 is not treated as unknown", geoarrow.Metadata{CRS: raw(`"SRID:0"`)}, "SRID:0", `"SRID:0"`, ""},
 		{"projjson reference", geoarrow.Metadata{CRS: raw(`"projjson:geo.crs"`)}, "projjson:geo.crs", `"projjson:geo.crs"`, ""},
 	}
 

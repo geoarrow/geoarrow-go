@@ -61,9 +61,8 @@ const (
 	// integer keys whose meaning depends on the producer (such as a database's
 	// spatial_ref_sys table), so they are not interpreted as EPSG codes.
 	//
-	// The prefix is matched case-insensitively (the Iceberg spec's example is
-	// "SRID:0"). It is written in this lowercase form when adding a prefix to a
-	// bare SRID or canonicalizing "srid:0"; other SRID strings keep their case.
+	// The prefix is matched case-sensitively, as the Parquet spec writes it and
+	// as arrow-rs matches it, so e.g. "SRID:0" is not recognized as an SRID.
 	parquetSRIDPrefix = "srid:"
 	// parquetDefaultCRS is the CRS Parquet assumes when none is written.
 	parquetDefaultCRS = "OGC:CRS84"
@@ -83,8 +82,7 @@ const (
 //     stored as "OGC:CRS84", since an omitted GeoArrow CRS means unknown.
 //   - "srid:0" is the conventional unknown-CRS value (used by arrow-rs, but not
 //     defined as such by the Parquet spec) and leaves the GeoArrow CRS omitted.
-//     The "srid:" prefix is matched case-insensitively, so "SRID:0" is also
-//     unknown.
+//     The prefix is matched case-sensitively, so "SRID:0" is not unknown.
 //   - Inline PROJJSON objects are stored as-is with crs_type "projjson".
 //   - Any other string, including other "srid:<id>" values (kept whole, as
 //     arrow-rs does, rather than split into "<id>" plus crs_type "srid"),
@@ -129,10 +127,8 @@ func (m *Metadata) SetCRSString(crs string) {
 //     Arrow C++ and GDAL; the "srid:0" unknown-CRS rule follows arrow-rs.
 //   - A bare SRID with crs_type "srid" (e.g. "4326" from another producer) is
 //     written as "srid:<id>".
-//   - Any "srid:0" (prefix matched case-insensitively) is written as the
-//     canonical lowercase "srid:0".
-//   - Inline PROJJSON and other strings, including other "srid:<id>" values,
-//     are written as-is.
+//   - Inline PROJJSON and other strings, including "srid:<id>" values, are
+//     written as-is.
 func (m Metadata) ParquetCRS() string {
 	if crs := bytes.TrimSpace(m.CRS); len(crs) == 0 || bytes.Equal(crs, []byte("null")) {
 		return parquetSRIDPrefix + parquetUnknownSRID
@@ -151,34 +147,20 @@ func (m Metadata) ParquetCRS() string {
 		return ""
 	}
 	if m.CRSType == CRSTypeSRID {
-		if _, ok := cutSRIDPrefix(crs); !ok {
+		if !strings.HasPrefix(crs, parquetSRIDPrefix) {
 			crs = parquetSRIDPrefix + crs
 		}
 	}
 
-	switch {
-	case isUnknownSRID(crs):
-		return parquetSRIDPrefix + parquetUnknownSRID
-	case crs == parquetDefaultCRS || crs == "EPSG:4326":
+	if crs == parquetDefaultCRS || crs == "EPSG:4326" {
 		return ""
 	}
 	return crs
 }
 
-// cutSRIDPrefix returns crs without its "srid:" prefix, matching the prefix
-// case-insensitively, and reports whether the prefix was present.
-func cutSRIDPrefix(crs string) (string, bool) {
-	if len(crs) < len(parquetSRIDPrefix) || !strings.EqualFold(crs[:len(parquetSRIDPrefix)], parquetSRIDPrefix) {
-		return "", false
-	}
-	return crs[len(parquetSRIDPrefix):], true
-}
-
-// isUnknownSRID reports whether crs is the unknown-CRS SRID, "srid:0", with
-// the prefix matched case-insensitively.
+// isUnknownSRID reports whether crs is the unknown-CRS SRID, "srid:0".
 func isUnknownSRID(crs string) bool {
-	id, ok := cutSRIDPrefix(crs)
-	return ok && id == parquetUnknownSRID
+	return crs == parquetSRIDPrefix+parquetUnknownSRID
 }
 
 // isPROJJSONDefaultCRS reports whether a PROJJSON object identifies itself as
