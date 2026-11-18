@@ -56,10 +56,14 @@ func NewMetadata() Metadata {
 }
 
 const (
-	// parquetSRIDPrefix is the Parquet spec prefix for CRS values that are
-	// integer identifiers from a catalog, e.g. "srid:4326". It is matched
-	// case-insensitively on read (the Iceberg spec's example is "SRID:0") but
-	// always written in this lowercase form.
+	// parquetSRIDPrefix is the Parquet spec prefix for CRS values given as a
+	// spatial reference identifier (SRID), e.g. "srid:4326". SRIDs are opaque
+	// integer keys whose meaning depends on the producer (such as a database's
+	// spatial_ref_sys table), so they are not interpreted as EPSG codes.
+	//
+	// The prefix is matched case-insensitively (the Iceberg spec's example is
+	// "SRID:0"). It is written in this lowercase form when adding a prefix to a
+	// bare SRID or canonicalizing "srid:0"; other SRID strings keep their case.
 	parquetSRIDPrefix = "srid:"
 	// parquetDefaultCRS is the CRS Parquet assumes when none is written.
 	parquetDefaultCRS = "OGC:CRS84"
