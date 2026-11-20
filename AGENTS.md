@@ -11,7 +11,7 @@ geoarrow-go has the following relationship with the wider go arrow/parquet/icebe
     - Provides the pqarrow hooks that let an extension type pick its Parquet logical type on write and read
     - Does not import geoarrow-go; contains some logic for calculating geospatial Parquet row group stats
 - iceberg-go
-    - Imports geoarrow-go and is one of geoarrow-go's key downstream users. It is advisible to check out iceberg-go and run its test suite using `replace` in the `go.mod` to verify any new geoarrow-go changes will not break anything.
+    - Imports geoarrow-go and is one of geoarrow-go's key downstream users. It is advisable to check out iceberg-go and run its test suite using `replace` in the `go.mod` to verify any new geoarrow-go changes will not break anything.
     - Maps Iceberg GEOMETRY/GEOGRAPHY types and their CRS to the geoarrow Arrow extension type
     - Computes the Iceberg manifest bounds and null counts for geo columns from the Arrow data, not from Parquet stats
 
