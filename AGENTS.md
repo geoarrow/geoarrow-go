@@ -19,10 +19,6 @@ geoarrow-go has the following relationship with the wider go arrow/parquet/icebe
 
 When making changes to geoarrow-go, if there is a behavior that is ambiguous or undefined in the geoarrow specification it is best to defer to interoperability and follow other the practices of other mature implementations like https://github.com/apache/arrow-rs and https://github.com/geoarrow/geoarrow-rs as well as GDAL's geoarrow driver: https://gdal.org/en/stable/drivers/vector/arrow.html
 
-## PR Best Practices
-
-PRs generated primarily by an agent should be marked as such and contain a summary that is succinct by thorough for human review.
-
 ## Testing Changes
 
 - When changing anything related to Parquet write behavior (logical type selection, CRS, edges, metadata), also test the round trip for both directions: write Arrow to Parquet and read it back, and read Parquet and write it back. Confirm the extension type, CRS, and edges survive unchanged, or change in only the intended, documented ways. Cover edge cases like an unset / null CRS.
