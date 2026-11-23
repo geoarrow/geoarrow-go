@@ -92,3 +92,31 @@ type GeometryValue interface {
 	Dimension() Dimension
 	GeometryType() GeometryTypeID
 }
+
+// geometryTypeID returns the GeometryTypeID for a base (XY) type id such as
+// LineStringID in the given dimension, applying the +10/+20/+30 offset for
+// Z/M/ZM.
+func geometryTypeID(base GeometryTypeID, dim Dimension) GeometryTypeID {
+	switch dim {
+	case XY:
+		return base
+	case XYZ:
+		return base + 10
+	case XYM:
+		return base + 20
+	case XYZM:
+		return base + 30
+	default:
+		// Unreachable: dim is set by a constructor or by validated storage.
+		panic("invalid coordinate dimension")
+	}
+}
+
+// checkAppendDim panics if a non-empty value's dimension differs from the
+// dimension of the builder's storage, which would otherwise write ragged
+// coordinates. An empty value has no coordinates and fits any dimension.
+func checkAppendDim(typeName string, got, want Dimension, empty bool) {
+	if got != want && !empty {
+		panic(fmt.Sprintf("%s: value has dimension %s, builder expects %s", typeName, got, want))
+	}
+}

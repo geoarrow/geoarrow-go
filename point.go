@@ -128,9 +128,15 @@ func (v PointValue) MarshalJSON() ([]byte, error) {
 	return json.Marshal(v.coords)
 }
 
-// IsEmpty reports whether v carries no coordinates.
+// IsEmpty reports whether v carries no coordinates, or only NaN coordinates,
+// which is how the GeoArrow spec stores an empty point.
 func (v PointValue) IsEmpty() bool {
-	return len(v.coords) == 0
+	for _, c := range v.coords {
+		if !math.IsNaN(c) {
+			return false
+		}
+	}
+	return true
 }
 
 // NewPointType constructs a PointType with the given options. The default
@@ -219,7 +225,7 @@ func (pt *PointType) ExtensionEquals(other arrow.ExtensionType) bool {
 		return false
 	}
 
-	return pt.Storage.ID() == otherPt.Storage.ID() && pt.Equal(&otherPt.Extension)
+	return sameCoordStorage(pt.Storage, otherPt.Storage) && pt.Equal(&otherPt.Extension)
 }
 
 func (pt *PointType) ArrayType() reflect.Type {
@@ -237,6 +243,18 @@ func (pt *PointType) valueFromArray(a array.ExtensionArray, i int) PointValue {
 }
 
 func (pt *PointType) appendValueToBuilder(b array.Builder, v PointValue) {
+	dim := DimensionFromStorage(pt.StorageType())
+	if v.IsEmpty() {
+		// The spec represents an empty point as NaN coordinates; writing no
+		// coordinates at all would leave the struct children short.
+		coords := make([]float64, dim.NDim())
+		for i := range coords {
+			coords[i] = math.NaN()
+		}
+		appendCoord(b, coords)
+		return
+	}
+	checkAppendDim("geoarrow.point", v.dim, dim, false)
 	appendCoord(b, v.coords)
 }
 

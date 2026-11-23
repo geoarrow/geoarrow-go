@@ -73,3 +73,44 @@ func decodeCoordList(dec *json.Decoder) ([]float64, error) {
 	}
 	return out, nil
 }
+
+// decodeCoordListList decodes [[[x,y],...], ...] into one flat slice per
+// inner list. Caller must have already consumed the outer '['; the matching
+// ']' is consumed before returning.
+func decodeCoordListList(dec *json.Decoder) ([][]float64, error) {
+	var out [][]float64
+	for dec.More() {
+		if err := expectDelim(dec, '['); err != nil {
+			return nil, err
+		}
+		coords, err := decodeCoordList(dec)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, coords)
+	}
+	if _, err := dec.Token(); err != nil { // closing ']'
+		return nil, err
+	}
+	return out, nil
+}
+
+// decodeCoordListListList decodes three levels of nesting around coords, as
+// used by MultiPolygon. Same open/close conventions as decodeCoordListList.
+func decodeCoordListListList(dec *json.Decoder) ([][][]float64, error) {
+	var out [][][]float64
+	for dec.More() {
+		if err := expectDelim(dec, '['); err != nil {
+			return nil, err
+		}
+		rings, err := decodeCoordListList(dec)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rings)
+	}
+	if _, err := dec.Token(); err != nil { // closing ']'
+		return nil, err
+	}
+	return out, nil
+}

@@ -2,6 +2,7 @@ package geoarrow_test
 
 import (
 	"bytes"
+	"math"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -31,9 +32,10 @@ func TestPointTypeBasics(t *testing.T) {
 	typ2 := geoarrow.NewPointType()
 	require.True(t, typ.ExtensionEquals(typ2))
 
-	// Different storage (XYZ) should still be equal (same extension + metadata)
+	// A different dimension is a different type, matching geoarrow-rs, whose
+	// types compare coord type, dimension and metadata.
 	typXYZ := geoarrow.NewPointType(geoarrow.PointWithDimension(geoarrow.XYZ))
-	require.True(t, typ.ExtensionEquals(typXYZ))
+	require.False(t, typ.ExtensionEquals(typXYZ))
 }
 
 func TestPointTypeWithMetadata(t *testing.T) {
@@ -653,4 +655,117 @@ func TestPointMarshalJSON(t *testing.T) {
 			require.JSONEq(t, tc.expected, string(b))
 		})
 	}
+}
+
+// Point and polygon types compare coordinate layout and dimension, like the
+// other native types (and geoarrow-rs).
+func TestPointPolygonExtensionEqualsStrict(t *testing.T) {
+	dims := []geoarrow.Dimension{geoarrow.XY, geoarrow.XYZ, geoarrow.XYM, geoarrow.XYZM}
+	point := func(d geoarrow.Dimension, il bool) arrow.ExtensionType {
+		if il {
+			return geoarrow.NewPointType(geoarrow.PointWithInterleaved(d))
+		}
+		return geoarrow.NewPointType(geoarrow.PointWithDimension(d))
+	}
+	polygon := func(d geoarrow.Dimension, il bool) arrow.ExtensionType {
+		if il {
+			return geoarrow.NewPolygonType(geoarrow.PolygonWithInterleaved(d))
+		}
+		return geoarrow.NewPolygonType(geoarrow.PolygonWithDimension(d))
+	}
+	for name, mk := range map[string]func(geoarrow.Dimension, bool) arrow.ExtensionType{"point": point, "polygon": polygon} {
+		t.Run(name, func(t *testing.T) {
+			for _, a := range dims {
+				for _, aIL := range []bool{false, true} {
+					for _, b := range dims {
+						for _, bIL := range []bool{false, true} {
+							want := a == b && aIL == bIL
+							require.Equal(t, want, mk(a, aIL).ExtensionEquals(mk(b, bIL)),
+								"%s interleaved=%v vs %s interleaved=%v", a, aIL, b, bIL)
+						}
+					}
+				}
+			}
+		})
+	}
+
+	// Field names and nullability do not make types differ.
+	other := arrow.StructOf(
+		arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
+		arrow.Field{Name: "y", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
+	)
+	got, err := geoarrow.NewPointType().Deserialize(other, "{}")
+	require.NoError(t, err)
+	require.True(t, geoarrow.NewPointType().ExtensionEquals(got))
+}
+
+func TestPointPolygonAppendWrongDimensionPanics(t *testing.T) {
+	for _, il := range []bool{false, true} {
+		mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+
+		pt := geoarrow.NewPointType(geoarrow.PointWithDimension(geoarrow.XY))
+		if il {
+			pt = geoarrow.NewPointType(geoarrow.PointWithInterleaved(geoarrow.XY))
+		}
+		pb := pt.NewBuilder(mem).(*geoarrow.PointBuilder)
+		require.PanicsWithValue(t, "geoarrow.point: value has dimension XYZ, builder expects XY",
+			func() { pb.Append(geoarrow.NewPointValueZ(1, 2, 3)) })
+		require.Equal(t, 0, pb.Len())
+		pb.Release()
+
+		poly := geoarrow.NewPolygonType(geoarrow.PolygonWithDimension(geoarrow.XY))
+		if il {
+			poly = geoarrow.NewPolygonType(geoarrow.PolygonWithInterleaved(geoarrow.XY))
+		}
+		yb := poly.NewBuilder(mem).(*geoarrow.PolygonBuilder)
+		require.PanicsWithValue(t, "geoarrow.polygon: value has dimension XYZ, builder expects XY",
+			func() {
+				yb.Append(geoarrow.NewPolygonValue(geoarrow.XYZ, [][]float64{{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0}}))
+			})
+		require.Equal(t, 0, yb.Len())
+		// An empty polygon has no coordinates, so any dimension fits.
+		yb.Append(geoarrow.NewPolygonValue(geoarrow.XYZ, nil))
+		arr := yb.NewArray()
+		require.NoError(t, array.ValidateFull(arr))
+		arr.Release()
+		yb.Release()
+
+		mem.AssertSize(t, 0)
+	}
+}
+
+// An empty point is stored as NaN coordinates (per the spec) and reads back as
+// empty. Before, it was stored with no coordinates, which corrupted the array.
+func TestPointEmptyStoredAsNaN(t *testing.T) {
+	for _, il := range []bool{false, true} {
+		mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+		typ := geoarrow.NewPointType(geoarrow.PointWithDimension(geoarrow.XYZ))
+		if il {
+			typ = geoarrow.NewPointType(geoarrow.PointWithInterleaved(geoarrow.XYZ))
+		}
+		b := typ.NewBuilder(mem).(*geoarrow.PointBuilder)
+		b.Append(geoarrow.NewPointValueZ(1, 2, 3))
+		require.NoError(t, b.AppendValueFromString("POINT Z EMPTY"))
+		b.Append(geoarrow.PointValue{})
+		b.Append(geoarrow.NewPointValueZ(4, 5, 6))
+		arr := b.NewArray()
+		require.NoError(t, array.ValidateFull(arr))
+
+		pa := arr.(*geoarrow.PointArray)
+		require.Equal(t, 4, pa.Len())
+		require.Equal(t, 0, pa.NullN())
+		for _, i := range []int{1, 2} {
+			v := pa.Value(i)
+			require.True(t, v.IsEmpty(), "row %d", i)
+			require.True(t, math.IsNaN(v.X()), "row %d", i)
+			require.Equal(t, "POINT Z EMPTY", pa.ValueStr(i))
+		}
+		require.Equal(t, 6.0, pa.Value(3).Z())
+
+		arr.Release()
+		b.Release()
+		mem.AssertSize(t, 0)
+	}
+	require.True(t, geoarrow.NewPointValue(math.NaN(), math.NaN()).IsEmpty())
+	require.False(t, geoarrow.NewPointValue(math.NaN(), 1).IsEmpty())
 }
