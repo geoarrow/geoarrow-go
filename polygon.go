@@ -202,7 +202,7 @@ func (pt *PolygonType) ExtensionEquals(other arrow.ExtensionType) bool {
 	if pt == nil || otherPt == nil {
 		return false
 	}
-	return pt.Storage.ID() == otherPt.Storage.ID() && pt.Equal(&otherPt.Extension)
+	return sameNestedStorage(pt.Storage, otherPt.Storage, len(polygonNesting)) && pt.Equal(&otherPt.Extension)
 }
 
 func (*PolygonType) ArrayType() reflect.Type {
@@ -241,13 +241,15 @@ func (pt *PolygonType) valueFromArray(a array.ExtensionArray, i int) PolygonValu
 }
 
 func (pt *PolygonType) appendValueToBuilder(b array.Builder, v PolygonValue) {
+	dim := DimensionFromStorage(polygonCoordStorage(pt.StorageType()))
+	checkAppendDim("geoarrow.polygon", v.dim, dim, v.IsEmpty())
+	stride := dim.NDim()
+
 	outerListBuilder := b.(*array.ListBuilder)
 	outerListBuilder.Append(true)
 
 	innerListBuilder := outerListBuilder.ValueBuilder().(*array.ListBuilder)
 	coordBuilder := innerListBuilder.ValueBuilder()
-
-	stride := v.dim.NDim()
 	for _, ring := range v.rings {
 		innerListBuilder.Append(true)
 		appendCoords(coordBuilder, ring, stride)

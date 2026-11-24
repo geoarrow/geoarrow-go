@@ -7,21 +7,31 @@ import (
 )
 
 const (
-	ExtensionNameWKB     = "geoarrow.wkb"
-	ExtensionNamePoint   = "geoarrow.point"
-	ExtensionNamePolygon = "geoarrow.polygon"
-	// TODO ExtensionNameWKT = "geoarrow.wkt"
-	// TODO ExtensionNameLineString = "geoarrow.linestring"
-	// TODO ExtensionNameMultiPoint = "geoarrow.multipoint"
-	// TODO ExtensionNameMultiLineString = "geoarrow.multilinestring"
-	// TODO ExtensionNameMultiPolygon = "geoarrow.multipolygon"
+	ExtensionNameWKB             = "geoarrow.wkb"
+	ExtensionNamePoint           = "geoarrow.point"
+	ExtensionNameLineString      = "geoarrow.linestring"
+	ExtensionNamePolygon         = "geoarrow.polygon"
+	ExtensionNameMultiPoint      = "geoarrow.multipoint"
+	ExtensionNameMultiLineString = "geoarrow.multilinestring"
+	ExtensionNameMultiPolygon    = "geoarrow.multipolygon"
+	ExtensionNameWKT             = "geoarrow.wkt"
+	ExtensionNameBox             = "geoarrow.box"
 	// TODO ExtensionNameGeometry = "geoarrow.geometry"
 	// TODO ExtensionNameGeometryCollection = "geoarrow.geometrycollection"
-	// TODO ExtensionNameBox = "geoarrow.box"
 )
 
 func init() {
-	for _, typ := range []arrow.ExtensionType{NewWKBType(), NewPointType(), NewPolygonType()} {
+	for _, typ := range []arrow.ExtensionType{
+		NewWKBType(),
+		NewPointType(),
+		NewLineStringType(),
+		NewPolygonType(),
+		NewMultiPointType(),
+		NewMultiLineStringType(),
+		NewMultiPolygonType(),
+		NewWKTType(),
+		NewBoxType(),
+	} {
 		if err := arrow.RegisterExtensionType(typ); err != nil {
 			panic(err)
 		}

@@ -287,3 +287,19 @@ func appendCoords(b array.Builder, coords []float64, stride int) {
 		panic(fmt.Sprintf("appendCoords: unsupported coord builder type %T", b))
 	}
 }
+
+// sameCoordStorage reports whether a and b are the same coordinate layout
+// (separated struct vs. interleaved) and dimension. Field names and
+// nullability are ignored: the spec requires readers to accept other names
+// where the interpretation is unambiguous, so they do not make types differ.
+func sameCoordStorage(a, b arrow.DataType) bool {
+	return a.ID() == b.ID() && DimensionFromStorage(a) == DimensionFromStorage(b)
+}
+
+// sameNestedStorage is sameCoordStorage for coordinates wrapped in depth
+// layers of List. It is false if either storage is not that deep.
+func sameNestedStorage(a, b arrow.DataType, depth int) bool {
+	ca, errA := unwrapNestedLists(a, depth)
+	cb, errB := unwrapNestedLists(b, depth)
+	return errA == nil && errB == nil && sameCoordStorage(ca, cb)
+}
