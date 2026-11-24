@@ -103,11 +103,36 @@ func (s WKTString) String() string {
 	return string(s)
 }
 
-// IsEmpty reports whether the text is blank or spells an empty geometry
-// ("POINT EMPTY", "POLYGON Z EMPTY").
+// IsEmpty reports whether the text spells an empty geometry: a geometry
+// keyword, an optional Z/M/ZM marker, then EMPTY ("POINT EMPTY",
+// "POLYGON Z EMPTY", "LINESTRINGZM EMPTY"). Blank text is not an empty
+// geometry, so the "" that a null slot reads back as is not reported as one;
+// use the array's IsNull to detect nulls.
 func (s WKTString) IsEmpty() bool {
-	text := strings.ToUpper(strings.TrimSpace(string(s)))
-	return text == "" || strings.HasSuffix(text, "EMPTY")
+	fields := strings.Fields(strings.ToUpper(string(s)))
+	n := len(fields)
+	if n < 2 || n > 3 || fields[n-1] != "EMPTY" {
+		return false
+	}
+	marker := ""
+	if n == 3 {
+		marker = fields[1]
+		if marker != "Z" && marker != "M" && marker != "ZM" {
+			return false
+		}
+	}
+	for _, k := range wktKeywords {
+		if fields[0] == k.name {
+			return true
+		}
+		// Fused marker spelling, e.g. "POINTZ EMPTY", unless a marker
+		// was also given separately.
+		if rest, ok := strings.CutPrefix(fields[0], k.name); ok && marker == "" &&
+			(rest == "Z" || rest == "M" || rest == "ZM") {
+			return true
+		}
+	}
+	return false
 }
 
 // Dimension returns the coordinate dimension declared by the text.
@@ -219,6 +244,8 @@ func (*WKTType) ArrayType() reflect.Type {
 	return reflect.TypeFor[WKTArray]()
 }
 
+// valueFromArray returns "" for a null slot. "" is not an empty geometry
+// (IsEmpty is false), so a null is never mistaken for e.g. "POINT EMPTY".
 func (*WKTType) valueFromArray(a array.ExtensionArray, i int) WKTString {
 	if a.IsNull(i) {
 		return ""

@@ -40,8 +40,19 @@ func TestWKTStringHeader(t *testing.T) {
 		// GEOMETRYCOLLECTION has no GeometryTypeID.
 		{"GEOMETRYCOLLECTION (POINT (1 2))", 0, geoarrow.XY, false},
 		{"GEOMETRYCOLLECTION Z EMPTY", 0, geoarrow.XYZ, true},
+		{"GEOMETRYCOLLECTION EMPTY", 0, geoarrow.XY, true},
+		{"POINTZ EMPTY", geoarrow.PointZID, geoarrow.XYZ, true},
 		{"not wkt", 0, geoarrow.XY, false},
-		{"", 0, geoarrow.XY, true},
+		// Blank text (what a null slot reads back as) is not an empty geometry.
+		{"", 0, geoarrow.XY, false},
+		{"   ", 0, geoarrow.XY, false},
+		// EMPTY must directly follow the keyword and optional marker.
+		{"EMPTY", 0, geoarrow.XY, false},
+		{"NOTAGEOMETRY EMPTY", 0, geoarrow.XY, false},
+		{"POINT Q EMPTY", geoarrow.PointID, geoarrow.XY, false},
+		{"POINTZ Z EMPTY", geoarrow.PointZID, geoarrow.XYZ, false},
+		{"POINT (1 2) EMPTY", geoarrow.PointID, geoarrow.XY, false},
+		{"MULTIPOINT (EMPTY)", geoarrow.MultiPointID, geoarrow.XY, false},
 	} {
 		t.Run(tc.wkt, func(t *testing.T) {
 			v := geoarrow.WKTString(tc.wkt)
@@ -452,4 +463,27 @@ func TestNewBoxValueFromBoundsValidates(t *testing.T) {
 	v := geoarrow.NewBoxValueFromBounds(geoarrow.XYM, []float64{0, 1, 2}, []float64{3, 4, 5})
 	require.Equal(t, 2.0, v.MMin())
 	require.Equal(t, 5.0, v.MMax())
+}
+
+// A null slot and an empty geometry must be distinguishable through Value(i):
+// a null reads back as "", which is not reported as an empty geometry.
+func TestWKTNullIsNotEmpty(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	b := geoarrow.NewWKTType().NewBuilder(mem).(*geoarrow.WKTBuilder)
+	defer b.Release()
+	b.AppendNull()
+	b.Append("POINT EMPTY")
+	arr := b.NewArray()
+	defer arr.Release()
+
+	wa := arr.(*geoarrow.WKTArray)
+	require.True(t, wa.IsNull(0))
+	require.Equal(t, geoarrow.WKTString(""), wa.Value(0))
+	require.False(t, wa.Value(0).IsEmpty(), "null must not look like an empty geometry")
+
+	require.True(t, wa.IsValid(1))
+	require.True(t, wa.Value(1).IsEmpty())
+	require.NotEqual(t, wa.Value(0), wa.Value(1))
 }
